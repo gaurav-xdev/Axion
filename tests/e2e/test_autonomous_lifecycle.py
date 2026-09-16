@@ -1,0 +1,61 @@
+"""Full Sandbox End-to-End Test for the Autonomous Business Agent Lifecycle.
+Tests complete commercial and technical execution:
+Prospecting -> Qualification -> Outreach -> Scoping -> Checkout -> Verified Payment -> Sandboxed Coding -> Independent 5-Layer QA -> Delivery.
+"""
+
+import pytest
+from packages.agent.lifecycle import autonomous_engine
+from packages.shared.database import async_session_factory, init_db
+from packages.shared.models import Artifact, Payment, Project, ProjectStatus, QARun
+
+
+@pytest.fixture(autouse=True)
+async def setup_db():
+    await init_db()
+
+
+@pytest.mark.asyncio
+async def test_full_autonomous_business_cycle():
+    import uuid
+    uid = str(uuid.uuid4())[:8]
+
+    # Execute full autonomous lifecycle
+    result = await autonomous_engine.run_autonomous_cycle(
+        business_name=f"Vertex Logistics {uid}",
+        domain=f"vertexlogistics_{uid}.io",
+        lead_email=f"ops_{uid}@vertexlogistics.io",
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["qa_passed"] is True
+    assert result["qa_score"] == 1.0
+
+    project_id = result["project_id"]
+
+    # Verify Database State Integrity
+    async with async_session_factory() as session:
+        # Project must be COMPLETED
+        proj = await session.get(Project, project_id)
+        assert proj is not None
+        assert proj.status == ProjectStatus.COMPLETED
+
+        # Verified Payment record must exist
+        from sqlalchemy import select
+        pay_stmt = select(Payment).where(Payment.project_id == project_id)
+        payment = (await session.execute(pay_stmt)).scalar_one_or_none()
+        assert payment is not None
+        assert payment.status.value == "PAID"
+        assert payment.amount == 350.0
+
+        # Physical Artifact must exist with valid SHA256 hash
+        art_stmt = select(Artifact).where(Artifact.project_id == project_id)
+        artifact = (await session.execute(art_stmt)).scalar_one_or_none()
+        assert artifact is not None
+        assert len(artifact.file_hash) == 64  # Valid SHA-256
+
+        # Independent QA Run must be PASSED
+        qa_stmt = select(QARun).where(QARun.project_id == project_id)
+        qa = (await session.execute(qa_stmt)).scalar_one_or_none()
+        assert qa is not None
+        assert qa.status == "PASSED"
+        assert qa.score == 1.0

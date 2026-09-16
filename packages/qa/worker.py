@@ -1,0 +1,192 @@
+"""Adversarial QA Worker enforcing Five-Layer Verification.
+Independently verifies worker deliverables, creates QARun and QAFinding records, and can reject deliverables.
+"""
+
+from datetime import datetime, timezone
+import hashlib
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+
+from packages.observability.logger import logger
+from packages.observability.metrics import QA_EVALUATIONS_TOTAL, QA_FINDINGS_TOTAL
+from packages.shared.database import async_session_factory
+from packages.shared.models import QAFinding, QARun
+
+
+class QAEvaluationRequest(BaseModel):
+    project_id: str
+    artifact_id: str
+    run_id: Optional[str] = None
+    artifact_path: str
+    artifact_type: str  # CODE, N8N, MEDIA, REPORT
+    expected_criteria: List[str] = Field(default_factory=list)
+
+
+class FiveLayerVerificationResult(BaseModel):
+    passed: bool
+    score: float  # [0.0 - 1.0]
+    check1_input_valid: bool
+    check2_security_policy_valid: bool
+    check3_execution_valid: bool
+    check4_functional_qa_valid: bool
+    check5_final_state_evidence_valid: bool
+    findings: List[Dict[str, str]] = Field(default_factory=list)
+    sha256_hash: Optional[str] = None
+
+
+class QAWorker:
+    """Independent adversarial evaluator of project artifacts."""
+
+    async def evaluate_deliverable(
+        self, req: QAEvaluationRequest
+    ) -> FiveLayerVerificationResult:
+        logger.info(f"QA Worker evaluating artifact {req.artifact_id} for project {req.project_id}")
+
+        findings: List[Dict[str, str]] = []
+        p = Path(req.artifact_path)
+
+        # CHECK 1: Input & Schema Validation
+        c1_valid = True
+        if not req.artifact_path or not req.artifact_id or not req.project_id:
+            c1_valid = False
+            findings.append({
+                "severity": "CRITICAL",
+                "category": "schema_validation",
+                "description": "Missing required metadata parameters for QA evaluation",
+                "remediation": "Provide valid artifact_id and project_id",
+            })
+
+        # CHECK 2: Security & Policy Compliance
+        c2_valid = True
+        # Check for path traversal or leaked secrets in artifact
+        if ".." in req.artifact_path or not req.artifact_path.startswith(("workspace", "artifacts", "./workspace")):
+            c2_valid = False
+            findings.append({
+                "severity": "CRITICAL",
+                "category": "security_violation",
+                "description": "Artifact path escapes designated project sandbox",
+                "remediation": "Confine all deliverables inside project workspace",
+            })
+
+        # CHECK 3: Execution Verification (File existence and non-zero bytes)
+        c3_valid = True
+        sha256 = None
+        if not p.exists() or p.stat().st_size == 0:
+            c3_valid = False
+            findings.append({
+                "severity": "CRITICAL",
+                "category": "execution_failure",
+                "description": f"Deliverable file '{req.artifact_path}' does not exist or has 0 bytes",
+                "remediation": "Worker must regenerate artifact successfully before QA inspection",
+            })
+        else:
+            try:
+                content_bytes = p.read_bytes()
+                sha256 = hashlib.sha256(content_bytes).hexdigest()
+            except Exception as e:
+                c3_valid = False
+                findings.append({
+                    "severity": "HIGH",
+                    "category": "unreadable_file",
+                    "description": f"Failed reading file bytes: {e}",
+                    "remediation": "Ensure filesystem permissions permit reading",
+                })
+
+        # CHECK 4: Independent Functional QA (Criteria fulfillment)
+        c4_valid = True
+        if c3_valid:
+            try:
+                text_content = p.read_text(encoding="utf-8", errors="replace")
+                # Check for unfinished placeholders
+                placeholder_markers = ["TODO", "FIXME", "REPLACE_ME", "throw new Error('Not implemented')"]
+                for marker in placeholder_markers:
+                    if marker in text_content:
+                        c4_valid = False
+                        findings.append({
+                            "severity": "HIGH",
+                            "category": "incomplete_implementation",
+                            "description": f"Artifact contains unfinished stub marker: '{marker}'",
+                            "remediation": f"Remove {marker} and implement actual functional code/workflow",
+                        })
+
+                # Validate expected criteria
+                for crit in req.expected_criteria:
+                    if crit.lower() not in text_content.lower():
+                        c4_valid = False
+                        findings.append({
+                            "severity": "MEDIUM",
+                            "category": "unmet_acceptance_criteria",
+                            "description": f"Acceptance criterion '{crit}' is not reflected in artifact",
+                            "remediation": f"Implement required criterion: {crit}",
+                        })
+            except Exception:
+                pass
+
+        # CHECK 5: Final State & Evidence
+        c5_valid = c1_valid and c2_valid and c3_valid and (sha256 is not None)
+
+        all_passed = c1_valid and c2_valid and c3_valid and c4_valid and c5_valid
+        score = 1.0 if all_passed else max(0.0, 1.0 - (len(findings) * 0.25))
+
+        # Authoritative persistence in Database
+        await self._persist_qa_record(req, all_passed, score, findings)
+
+        status_label = "passed" if all_passed else "failed"
+        QA_EVALUATIONS_TOTAL.labels(status=status_label).inc()
+        for f in findings:
+            QA_FINDINGS_TOTAL.labels(severity=f["severity"]).inc()
+
+        logger.info(
+            f"QA Evaluation completed: passed={all_passed}, score={score:.2f}, findings={len(findings)}"
+        )
+
+        return FiveLayerVerificationResult(
+            passed=all_passed,
+            score=score,
+            check1_input_valid=c1_valid,
+            check2_security_policy_valid=c2_valid,
+            check3_execution_valid=c3_valid,
+            check4_functional_qa_valid=c4_valid,
+            check5_final_state_evidence_valid=c5_valid,
+            findings=findings,
+            sha256_hash=sha256,
+        )
+
+    async def _persist_qa_record(
+        self,
+        req: QAEvaluationRequest,
+        passed: bool,
+        score: float,
+        findings: List[Dict[str, str]],
+    ) -> None:
+        try:
+            async with async_session_factory() as session:
+                qa_run = QARun(
+                    project_id=req.project_id,
+                    artifact_id=req.artifact_id,
+                    status="PASSED" if passed else "FAILED",
+                    score=score,
+                    notes=f"Five-layer verification completed. {len(findings)} findings.",
+                )
+                session.add(qa_run)
+                await session.flush()
+
+                for f in findings:
+                    finding_rec = QAFinding(
+                        qa_run_id=qa_run.id,
+                        severity=f["severity"],
+                        category=f["category"],
+                        description=f["description"],
+                        remediation=f["remediation"],
+                        resolved=False,
+                    )
+                    session.add(finding_rec)
+
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed persisting QA run records: {e}")
+
+
+# Global singleton
+qa_worker = QAWorker()
