@@ -18,6 +18,7 @@ class ToolRequest(BaseModel):
     run_id: Optional[str] = None
     task_id: Optional[str] = None
     requested_by_role: str = "OPERATOR"
+    idempotency_key: Optional[str] = None
 
 
 class ToolResult(BaseModel):

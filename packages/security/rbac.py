@@ -26,10 +26,16 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "quotes:read",
         "quotes:write",
         "payments:read",
+        "payments:write",
         "artifacts:read",
         "qa:read",
         "qa:trigger",
         "tools:read",
+        "tools:execute",
+        "skills:read",
+        "skills:write",
+        "skills:publish",
+        "skills:execute",
         "audit:read",
         "settings:read",
     },
@@ -45,6 +51,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "audit:read",
         "tools:read",
         "metrics:read",
+        "skills:read",
     },
     UserRole.WORKER_SERVICE: {
         "tasks:read",
@@ -52,6 +59,8 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "artifacts:write",
         "tools:execute",
         "qa:write",
+        "skills:read",
+        "skills:execute",
     },
 }
 

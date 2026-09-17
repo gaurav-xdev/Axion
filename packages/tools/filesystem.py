@@ -25,8 +25,10 @@ def resolve_sandboxed_path(project_id: Optional[str], requested_path: str) -> Pa
     base_dir.mkdir(parents=True, exist_ok=True)
     target = (base_dir / requested_path).resolve()
 
-    # Path traversal check
-    if not str(target).startswith(str(base_dir)):
+    # Path traversal check: must be strictly inside base_dir
+    try:
+        target.relative_to(base_dir)
+    except ValueError:
         raise PermissionError(
             f"Path traversal violation: '{requested_path}' escapes project sandbox '{base_dir}'"
         )

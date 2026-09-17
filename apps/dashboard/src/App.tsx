@@ -14,7 +14,28 @@ import {
   Cpu,
   RefreshCw,
   Clock,
+  LogOut,
+  LogIn,
+  KeyRound,
+  Wrench,
 } from 'lucide-react';
+import { apiFetch, getSession, login, logout } from './api';
+
+interface SkillItem {
+  id: string;
+  skill_id: string;
+  name: string;
+  description: string;
+  category: string;
+  purpose: string;
+  version: string;
+  status: string;
+  allowed_tools: string[];
+  risk_class: string;
+  estimated_effort: number;
+  expected_duration_seconds: number;
+  published_at?: string;
+}
 
 interface AgentStatus {
   is_paused: boolean;
@@ -62,61 +83,103 @@ interface AuditLog {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'prospects' | 'payments' | 'security' | 'audit'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'prospects' | 'payments' | 'security' | 'audit' | 'skills'>('overview');
   const [auditReport, setAuditReport] = useState<any>(null);
   const [runningAudit, setRunningAudit] = useState<boolean>(false);
   const [cycleMsg, setCycleMsg] = useState<string>('');
+  
+  // Auth state
+  const [session, setSessionState] = useState(getSession());
+  const [emailInput, setEmailInput] = useState('admin@autonomousagency.local');
+  const [passwordInput, setPasswordInput] = useState('AdminSecurePassword2026!');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
-  // Queries
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const s = await login(emailInput, passwordInput);
+      setSessionState(s);
+      refetchStatus();
+    } catch (err: any) {
+      setAuthError(err.message || 'Login failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setSessionState(null);
+  };
+
+  // Queries using authoritative apiFetch
   const { data: status, refetch: refetchStatus } = useQuery<AgentStatus>({
-    queryKey: ['agent-status'],
+    queryKey: ['agent-status', session?.accessToken],
     queryFn: async () => {
-      const res = await fetch('/api/v1/agent/status', { credentials: 'omit' });
+      const res = await apiFetch('/api/v1/agent/status');
       if (!res.ok) return { is_paused: false, is_stopped: false, stop_outreach: false, active_mode: 'AUTONOMOUS' };
       return res.json();
     },
+    enabled: !!session,
   });
 
   const { data: projects = [] } = useQuery<Project[]>({
-    queryKey: ['projects'],
+    queryKey: ['projects', session?.accessToken],
     queryFn: async () => {
-      const res = await fetch('/api/v1/projects');
+      const res = await apiFetch('/api/v1/projects');
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: !!session,
   });
 
   const { data: prospects = [] } = useQuery<Prospect[]>({
-    queryKey: ['prospects'],
+    queryKey: ['prospects', session?.accessToken],
     queryFn: async () => {
-      const res = await fetch('/api/v1/prospects');
+      const res = await apiFetch('/api/v1/prospects');
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: !!session,
   });
 
   const { data: payments = [] } = useQuery<Payment[]>({
-    queryKey: ['payments'],
+    queryKey: ['payments', session?.accessToken],
     queryFn: async () => {
-      const res = await fetch('/api/v1/payments');
+      const res = await apiFetch('/api/v1/payments');
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: !!session,
   });
 
   const { data: auditLogs = [] } = useQuery<AuditLog[]>({
-    queryKey: ['audit'],
+    queryKey: ['audit', session?.accessToken],
     queryFn: async () => {
-      const res = await fetch('/api/v1/audit');
+      const res = await apiFetch('/api/v1/audit');
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: !!session,
+  });
+
+  const { data: skills = [] } = useQuery<SkillItem[]>({
+    queryKey: ['skills', session?.accessToken],
+    queryFn: async () => {
+      const res = await apiFetch('/api/v1/skills');
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: !!session,
   });
 
   // Emergency Control Handlers
   const handleEmergencyAction = async (action: 'pause' | 'stop' | 'resume') => {
     try {
-      await fetch(`/api/v1/agent/emergency/${action}`, { method: 'POST' });
+      await apiFetch(`/api/v1/agent/emergency/${action}`, { method: 'POST' });
       refetchStatus();
     } catch (e) {
       console.error(e);
@@ -126,7 +189,7 @@ export default function App() {
   const handleTriggerCycle = async () => {
     setCycleMsg('Running autonomous commercial cycle...');
     try {
-      const res = await fetch('/api/v1/agent/run-cycle', {
+      const res = await apiFetch('/api/v1/agent/run-cycle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -145,7 +208,7 @@ export default function App() {
   const handleRunSecurityAudit = async () => {
     setRunningAudit(true);
     try {
-      const res = await fetch('/api/v1/security/run-audit', { method: 'POST' });
+      const res = await apiFetch('/api/v1/security/run-audit', { method: 'POST' });
       const data = await res.json();
       setAuditReport(data);
     } catch (e) {
@@ -171,43 +234,124 @@ export default function App() {
           </div>
         </div>
 
-        {/* Global Emergency Controls */}
-        <div className="flex items-center space-x-3">
-          <button
-            onClick={() => handleEmergencyAction('resume')}
-            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
-              !status?.is_paused && !status?.is_stopped
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-white'
-            }`}
-          >
-            <Play className="w-3.5 h-3.5" />
-            <span>AUTONOMOUS</span>
-          </button>
-          <button
-            onClick={() => handleEmergencyAction('pause')}
-            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
-              status?.is_paused
-                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-amber-400'
-            }`}
-          >
-            <Pause className="w-3.5 h-3.5" />
-            <span>PAUSE AGENT</span>
-          </button>
-          <button
-            onClick={() => handleEmergencyAction('stop')}
-            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
-              status?.is_stopped
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-rose-400'
-            }`}
-          >
-            <StopCircle className="w-3.5 h-3.5" />
-            <span>STOP ALL</span>
-          </button>
+        {/* Global Controls and Auth Header */}
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => handleEmergencyAction('resume')}
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                !status?.is_paused && !status?.is_stopped
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                  : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-white'
+              }`}
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>AUTONOMOUS</span>
+            </button>
+            <button
+              onClick={() => handleEmergencyAction('pause')}
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                status?.is_paused
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-amber-400'
+              }`}
+            >
+              <Pause className="w-3.5 h-3.5" />
+              <span>PAUSE AGENT</span>
+            </button>
+            <button
+              onClick={() => handleEmergencyAction('stop')}
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                status?.is_stopped
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                  : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-rose-400'
+              }`}
+            >
+              <StopCircle className="w-3.5 h-3.5" />
+              <span>STOP ALL</span>
+            </button>
+          </div>
+
+          <div className="h-6 w-px bg-gray-800" />
+
+          {/* User Account / Session Controls */}
+          {session ? (
+            <div className="flex items-center space-x-3">
+              <div className="text-right">
+                <p className="text-xs font-semibold text-white">{session.email}</p>
+                <span className="inline-block px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 text-[10px] font-mono font-bold">
+                  {session.role}
+                </span>
+              </div>
+              <button
+                onClick={handleLogout}
+                title="Log Out"
+                className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-rose-400 border border-gray-700 transition"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2">
+              <span className="text-xs text-amber-400 font-mono">UNAUTHENTICATED</span>
+            </div>
+          )}
         </div>
       </header>
+
+      {/* Unauthenticated Login Modal */}
+      {!session && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="max-w-md w-full bg-[#0f172a] border border-gray-800 rounded-2xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-center space-x-3">
+              <div className="p-2.5 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30">
+                <KeyRound className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-white">Operator Authentication</h2>
+                <p className="text-xs text-gray-400 font-mono">RBAC + JWT BEARER TOKENS AUTHORITATIVE</p>
+              </div>
+            </div>
+
+            {authError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-400">
+                {authError}
+              </div>
+            )}
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1">Operator Email</label>
+                <input
+                  type="email"
+                  value={emailInput}
+                  onChange={(e) => setEmailInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1">Password</label>
+                <input
+                  type="password"
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
+                  required
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-semibold transition flex items-center justify-center space-x-2"
+              >
+                {authLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
+                <span>{authLoading ? 'Verifying...' : 'Sign In to Dashboard'}</span>
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Layout */}
       <div className="flex-1 flex max-w-7xl w-full mx-auto p-6 space-x-6">
@@ -215,6 +359,7 @@ export default function App() {
         <aside className="w-64 space-y-1">
           {[
             { id: 'overview', label: 'Overview', icon: Activity },
+            { id: 'skills', label: 'Skill Registry', icon: Wrench },
             { id: 'projects', label: 'Projects', icon: Briefcase },
             { id: 'prospects', label: 'Prospects', icon: Users },
             { id: 'payments', label: 'Payments', icon: DollarSign },
@@ -511,6 +656,78 @@ export default function App() {
                     <span className="text-gray-500">{new Date(log.created_at).toLocaleTimeString()}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 7: SKILL REGISTRY */}
+          {activeTab === 'skills' && (
+            <div className="space-y-6">
+              <div className="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-base font-bold text-white flex items-center space-x-2">
+                      <Wrench className="w-5 h-5 text-blue-400" />
+                      <span>Skill Registry & Execution Catalog</span>
+                    </h2>
+                    <p className="text-xs text-gray-400 font-mono">
+                      IMMUTABLE PUBLISHED CONTRACTS • TOOLGATEWAY ENFORCED • VERIFICATION-FIRST
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-400 text-xs font-mono font-bold border border-blue-500/20">
+                    {skills.length} Canonical Skills Loaded
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-gray-800/50 text-gray-400 font-mono uppercase text-[10px]">
+                      <tr>
+                        <th className="px-4 py-3">Skill Identifier</th>
+                        <th className="px-4 py-3">Category</th>
+                        <th className="px-4 py-3">Version</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3">Risk Level</th>
+                        <th className="px-4 py-3">Allowed Tools</th>
+                        <th className="px-4 py-3">Est. Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800/60 font-mono">
+                      {skills.map((s) => (
+                        <tr key={s.id} className="hover:bg-gray-800/30 transition">
+                          <td className="px-4 py-3 font-bold text-white">
+                            <div>{s.name}</div>
+                            <div className="text-[10px] text-gray-500 font-normal">{s.skill_id}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px]">
+                              {s.category}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-blue-400 font-bold">v{s.version}</td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300">
+                              {s.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              s.risk_class === 'CRITICAL' ? 'bg-rose-500/20 text-rose-300' :
+                              s.risk_class === 'HIGH' ? 'bg-amber-500/20 text-amber-300' :
+                              'bg-blue-500/20 text-blue-300'
+                            }`}>
+                              {s.risk_class}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-gray-400 text-[10px]">
+                            {s.allowed_tools?.length ? s.allowed_tools.join(', ') : 'None (Pure Compute)'}
+                          </td>
+                          <td className="px-4 py-3 text-gray-400">{s.expected_duration_seconds}s</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

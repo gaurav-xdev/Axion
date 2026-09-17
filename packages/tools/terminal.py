@@ -3,6 +3,7 @@ Enforces timeout, working directory confinement, and dangerous command filtering
 """
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict
@@ -48,10 +49,30 @@ class TerminalExecTool(BaseTool):
 
         cwd = resolve_sandboxed_path(context.project_id, params.subpath)
 
-        # Execute as isolated subprocess
+        # Build sanitized environment to prevent host secret leakage
+        SAFE_ENV_KEYS = {
+            "PATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "HOME",
+            "USERPROFILE",
+            "LANG",
+            "LC_ALL",
+        }
+        sanitized_env = {
+            k: v for k, v in os.environ.items() if k.upper() in SAFE_ENV_KEYS
+        }
+        sanitized_env["TERM"] = "dumb"
+
+        # Execute as isolated subprocess with clean environment
         proc = await asyncio.create_subprocess_shell(
             params.command,
             cwd=str(cwd),
+            env=sanitized_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

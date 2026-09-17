@@ -17,6 +17,7 @@ from packages.agent.lifecycle import autonomous_engine
 from packages.agent.runtime import emergency_controls
 from packages.observability.logger import ctx_request_id, logger
 from packages.payments.verification import payment_verification_service
+from packages.security.emergency import emergency_service
 from packages.security.auth import (
     create_access_token,
     create_refresh_token,
@@ -40,6 +41,12 @@ from packages.shared.models import (
 )
 
 
+from packages.skills.catalog import get_starter_skills
+from packages.skills.engine import skill_engine
+from packages.skills.registry import skill_registry
+from packages.skills.schemas import SkillDefinitionPayload, SkillExecutionRequest
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: initialize database schema
@@ -61,6 +68,24 @@ async def lifespan(app: FastAPI):
             session.add(admin_user)
             await session.commit()
             logger.info("Created default system administrator account: admin@autonomousagency.local")
+
+    # Seed and publish initial canonical starter skills if missing
+    try:
+        starter_skills = get_starter_skills()
+        for skill_payload in starter_skills:
+            try:
+                existing = await skill_registry.get_skill_version(
+                    skill_payload.skill_id, skill_payload.version
+                )
+                if not existing:
+                    await skill_registry.register_skill(skill_payload, actor="SYSTEM")
+                    await skill_registry.publish_skill(
+                        skill_payload.skill_id, skill_payload.version, actor="SYSTEM"
+                    )
+            except Exception as e:
+                logger.debug(f"Starter skill seed check: {e}")
+    except Exception as ex:
+        logger.warning(f"Failed to seed starter skills: {ex}")
 
     yield
 
@@ -180,6 +205,44 @@ async def login(req: LoginRequest):
         )
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@app.post("/api/v1/auth/refresh", response_model=TokenResponse)
+async def refresh_access_token(req: RefreshRequest):
+    """Refreshes short-lived JWT access token using verified refresh token."""
+    payload = decode_token(req.refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type: refresh token expected",
+        )
+
+    async with async_session_factory() as session:
+        user = await session.get(User, payload["sub"])
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account is inactive or not found",
+            )
+
+        token_data = {"sub": user.id, "email": user.email, "role": user.role.value}
+        new_access_token = create_access_token(token_data)
+        new_refresh_token = create_refresh_token(token_data)
+
+        return TokenResponse(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token,
+            role=user.role.value,
+        )
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(_: dict = Depends(get_current_token_payload)):
+    return {"status": "Successfully logged out"}
+
+
 @app.get("/api/v1/auth/me")
 async def get_current_user_profile(payload: dict = Depends(get_current_token_payload)):
     async with async_session_factory() as session:
@@ -220,31 +283,36 @@ async def trigger_cycle(
 
 @app.get("/api/v1/agent/status")
 async def get_agent_status(_: dict = Depends(require_permission("agent:read"))):
+    state = await emergency_service.get_state()
     return {
-        "is_paused": emergency_controls.is_paused,
-        "is_stopped": emergency_controls.is_stopped,
-        "stop_outreach": emergency_controls.stop_outreach,
+        "is_paused": state.is_paused,
+        "is_stopped": state.is_stopped,
+        "stop_outreach": state.stop_outreach,
         "active_mode": "AUTONOMOUS",
+        "updated_by": state.updated_by,
+        "version": state.version,
     }
 
 
 @app.post("/api/v1/agent/emergency/pause")
-async def pause_agent(_: dict = Depends(require_permission("agent:pause"))):
-    emergency_controls.is_paused = True
-    return {"status": "Agent execution paused"}
+async def pause_agent(token: dict = Depends(require_permission("agent:pause"))):
+    actor = token.get("email") or token.get("sub") or "OPERATOR"
+    state = await emergency_service.pause(actor=actor, reason="Operator paused via API")
+    return {"status": "Agent execution paused", "version": state.version}
 
 
 @app.post("/api/v1/agent/emergency/stop")
-async def stop_agent(_: dict = Depends(require_permission("agent:stop"))):
-    emergency_controls.is_stopped = True
-    return {"status": "Agent emergency stop activated"}
+async def stop_agent(token: dict = Depends(require_permission("agent:stop"))):
+    actor = token.get("email") or token.get("sub") or "OPERATOR"
+    state = await emergency_service.stop(actor=actor, reason="Emergency stop activated via API")
+    return {"status": "Agent emergency stop activated", "version": state.version}
 
 
 @app.post("/api/v1/agent/emergency/resume")
-async def resume_agent(_: dict = Depends(require_permission("agent:start"))):
-    emergency_controls.is_paused = False
-    emergency_controls.is_stopped = False
-    return {"status": "Agent execution resumed"}
+async def resume_agent(token: dict = Depends(require_permission("agent:start"))):
+    actor = token.get("email") or token.get("sub") or "OPERATOR"
+    state = await emergency_service.resume(actor=actor, reason="Authorized resume via API")
+    return {"status": "Agent execution resumed", "version": state.version}
 
 
 # -------------------------------------------------------------------------
@@ -368,3 +436,241 @@ async def dodo_webhook_receiver(
         raise HTTPException(status_code=400, detail=msg)
 
     return {"status": "accepted", "message": msg}
+
+
+# -------------------------------------------------------------------------
+# SKILL REGISTRY & EXECUTION ENDPOINTS
+# -------------------------------------------------------------------------
+
+@app.get("/api/v1/skills")
+async def list_skills(
+    category: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    payload: dict = Depends(require_permission("skills:read")),
+):
+    """List registered skills with optional category and status filters."""
+    s_filter = None
+    if status_filter:
+        try:
+            from packages.shared.models import SkillStatus
+            s_filter = SkillStatus(status_filter)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid status filter '{status_filter}'")
+
+    skills = await skill_registry.list_skills(category=category, status=s_filter)
+    return [
+        {
+            "id": s.id,
+            "skill_id": s.skill_id,
+            "name": s.name,
+            "description": s.description,
+            "category": s.category,
+            "purpose": s.purpose,
+            "version": s.version,
+            "status": s.status.value,
+            "allowed_tools": s.allowed_tool_names,
+            "risk_class": s.risk_class.value,
+            "estimated_effort": s.estimated_effort,
+            "expected_duration_seconds": s.expected_duration_seconds,
+            "published_at": s.published_at.isoformat() if s.published_at else None,
+            "created_at": s.created_at.isoformat(),
+        }
+        for s in skills
+    ]
+
+
+@app.get("/api/v1/skills/{skill_id}")
+async def get_skill(
+    skill_id: str,
+    version: Optional[str] = None,
+    payload: dict = Depends(require_permission("skills:read")),
+):
+    """Fetch exact or latest compatible skill version with full procedure, schemas, and metrics."""
+    try:
+        if version:
+            skill = await skill_registry.get_skill_version(skill_id, version)
+            if not skill:
+                raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' v{version} not found")
+        else:
+            skill = await skill_registry.resolve_compatible_skill(skill_id)
+    except Exception as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+
+    # Fetch associated metrics
+    async with async_session_factory() as session:
+        from packages.shared.models import SkillMetrics
+        stmt = select(SkillMetrics).where(
+            SkillMetrics.skill_id == skill.skill_id,
+            SkillMetrics.version == skill.version,
+        )
+        metrics = (await session.execute(stmt)).scalar_one_or_none()
+
+    return {
+        "id": skill.id,
+        "skill_id": skill.skill_id,
+        "name": skill.name,
+        "description": skill.description,
+        "category": skill.category,
+        "purpose": skill.purpose,
+        "version": skill.version,
+        "status": skill.status.value,
+        "input_schema": skill.input_schema,
+        "output_schema": skill.output_schema,
+        "prerequisites": skill.prerequisites,
+        "required_capabilities": skill.required_capabilities,
+        "allowed_tools": skill.allowed_tool_names,
+        "procedure": skill.procedure,
+        "verification_procedure": skill.verification_procedure,
+        "failure_modes": skill.failure_modes,
+        "risk_class": skill.risk_class.value,
+        "metrics": {
+            "execution_count": metrics.execution_count if metrics else 0,
+            "success_count": metrics.success_count if metrics else 0,
+            "failure_count": metrics.failure_count if metrics else 0,
+            "total_duration_ms": metrics.total_duration_ms if metrics else 0,
+        } if metrics else None,
+        "published_at": skill.published_at.isoformat() if skill.published_at else None,
+        "created_at": skill.created_at.isoformat(),
+    }
+
+
+@app.get("/api/v1/skills/{skill_id}/versions")
+async def list_skill_versions(
+    skill_id: str,
+    payload: dict = Depends(require_permission("skills:read")),
+):
+    """List all versions of a specific skill."""
+    skills = await skill_registry.list_skill_versions(skill_id)
+    return [
+        {
+            "id": s.id,
+            "version": s.version,
+            "status": s.status.value,
+            "created_at": s.created_at.isoformat(),
+            "published_at": s.published_at.isoformat() if s.published_at else None,
+        }
+        for s in skills
+    ]
+
+
+@app.post("/api/v1/skills/validate")
+async def validate_skill(
+    skill_data: SkillDefinitionPayload,
+    payload: dict = Depends(require_permission("skills:read")),
+):
+    """Static validation check of a skill definition payload."""
+    res = await skill_registry.validate_skill_payload(skill_data)
+    return res
+
+
+@app.post("/api/v1/skills")
+async def create_skill(
+    skill_data: SkillDefinitionPayload,
+    payload: dict = Depends(require_permission("skills:write")),
+):
+    """Register a new draft skill definition."""
+    try:
+        actor = payload.get("sub", "OPERATOR")
+        skill = await skill_registry.register_skill(skill_data, actor=actor)
+        return {
+            "id": skill.id,
+            "skill_id": skill.skill_id,
+            "version": skill.version,
+            "status": skill.status.value,
+            "message": "Skill registered successfully in DRAFT status",
+        }
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@app.post("/api/v1/skills/{skill_id}/publish")
+async def publish_skill(
+    skill_id: str,
+    version: str,
+    payload: dict = Depends(require_permission("skills:publish")),
+):
+    """Publish a draft skill. Once published, definition is immutable."""
+    try:
+        actor = payload.get("sub", "OPERATOR")
+        skill = await skill_registry.publish_skill(skill_id, version, actor=actor)
+        return {
+            "skill_id": skill.skill_id,
+            "version": skill.version,
+            "status": skill.status.value,
+            "published_at": skill.published_at.isoformat(),
+        }
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@app.post("/api/v1/skills/{skill_id}/deprecate")
+async def deprecate_skill(
+    skill_id: str,
+    version: str,
+    payload: dict = Depends(require_permission("skills:write")),
+):
+    """Deprecate a skill version."""
+    try:
+        actor = payload.get("sub", "OPERATOR")
+        skill = await skill_registry.deprecate_skill(skill_id, version, actor=actor)
+        return {"skill_id": skill.skill_id, "version": skill.version, "status": skill.status.value}
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@app.post("/api/v1/skills/{skill_id}/disable")
+async def disable_skill(
+    skill_id: str,
+    version: str,
+    payload: dict = Depends(require_permission("skills:write")),
+):
+    """Disable a skill version immediately."""
+    try:
+        actor = payload.get("sub", "OPERATOR")
+        skill = await skill_registry.disable_skill(skill_id, version, actor=actor)
+        return {"skill_id": skill.skill_id, "version": skill.version, "status": skill.status.value}
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@app.post("/api/v1/skill-executions")
+async def trigger_skill_execution(
+    req: SkillExecutionRequest,
+    payload: dict = Depends(require_permission("skills:execute")),
+):
+    """Execute a skill within authoritative emergency, RBAC, and ToolGateway limits."""
+    actor_role = payload.get("role", "OPERATOR")
+    actor_email = payload.get("sub", "operator@system.local")
+    result = await skill_engine.execute_skill(req, actor_role=actor_role, actor_email=actor_email)
+    return result.model_dump()
+
+
+@app.get("/api/v1/skill-executions/{execution_id}")
+async def get_skill_execution(
+    execution_id: str,
+    payload: dict = Depends(require_permission("skills:read")),
+):
+    """Fetch status, current step, evidence, and outcome of a skill execution."""
+    async with async_session_factory() as session:
+        from packages.shared.models import SkillExecution
+        exec_row = await session.get(SkillExecution, execution_id)
+        if not exec_row:
+            raise HTTPException(status_code=404, detail=f"Skill execution '{execution_id}' not found")
+
+        return {
+            "execution_id": exec_row.id,
+            "skill_id": exec_row.skill_id,
+            "version": exec_row.version,
+            "status": exec_row.status.value,
+            "current_step": exec_row.current_step,
+            "max_steps": exec_row.max_steps,
+            "input_payload": exec_row.input_payload,
+            "output_payload": exec_row.output_payload,
+            "evidence": exec_row.evidence,
+            "metrics": exec_row.metrics_json,
+            "error": exec_row.error,
+            "failure_class": exec_row.failure_class.value if exec_row.failure_class else None,
+            "started_at": exec_row.started_at.isoformat() if exec_row.started_at else None,
+            "completed_at": exec_row.completed_at.isoformat() if exec_row.completed_at else None,
+        }
+

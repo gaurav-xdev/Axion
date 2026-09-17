@@ -71,3 +71,33 @@ async def test_full_security_worker_audit_passes():
     assert len(report.passes) == 5
     for p in report.passes:
         assert p.passed is True, f"Security Pass {p.pass_number} ({p.name}) failed: {p.findings}"
+
+
+def test_path_traversal_prefix_collision_is_blocked():
+    """Verify that sibling directories with matching prefixes cannot be accessed."""
+    with pytest.raises(PermissionError):
+        # Even if a sibling directory exists with a shared prefix, target must be inside base_dir
+        resolve_sandboxed_path("p1", "../p1_escaped/secret.txt")
+
+
+@pytest.mark.asyncio
+async def test_subprocess_does_not_leak_parent_secrets(monkeypatch):
+    """Verify subprocesses executed via TerminalExecTool do not inherit sensitive host environment variables."""
+    import os
+    monkeypatch.setenv("APP_SECRET_KEY", "mock_app_secret_test_xyz")
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "mock_nim_key_test_12345")
+    monkeypatch.setenv("DODO_API_KEY", "mock_dodo_key_test_888")
+
+    tool = TerminalExecTool()
+    cmd = "echo APP_SECRET_KEY=%APP_SECRET_KEY% NVIDIA_NIM_API_KEY=%NVIDIA_NIM_API_KEY%" if os.name == "nt" else "echo APP_SECRET_KEY=$APP_SECRET_KEY NVIDIA_NIM_API_KEY=$NVIDIA_NIM_API_KEY"
+
+    result = await tool.execute(
+        TerminalExecInput(command=cmd),
+        ToolRequest(tool_name="terminal.exec", arguments={}, project_id="proj_secret_test"),
+    )
+    assert result["success"] is True
+    # The output should NOT contain the secret values
+    assert "mock_app_secret_test_xyz" not in result["stdout"]
+    assert "mock_nim_key_test_12345" not in result["stdout"]
+    assert "mock_dodo_key_test_888" not in result["stdout"]
+

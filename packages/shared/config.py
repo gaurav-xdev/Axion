@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     # Storage
     STORAGE_BACKEND: str = Field(default="local")
     STORAGE_LOCAL_PATH: str = Field(default="./workspace/storage")
+    S3_BUCKET: Optional[str] = Field(default=None)
+    S3_REGION: Optional[str] = Field(default=None)
+    S3_ACCESS_KEY: Optional[str] = Field(default=None)
+    S3_SECRET_KEY: Optional[str] = Field(default=None)
+    S3_ENDPOINT_URL: Optional[str] = Field(default=None)
 
     # Agent Guardrails & Limits
     MAX_ACTIVE_PROJECTS: int = Field(default=10)

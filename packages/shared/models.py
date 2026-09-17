@@ -19,6 +19,7 @@ from sqlalchemy import (
     JSON,
     Enum as SQLEnum,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -125,6 +126,53 @@ class ChannelType(str, Enum):
     WHATSAPP = "WHATSAPP"
     VOICE = "VOICE"
     SYSTEM = "SYSTEM"
+
+
+class SkillStatus(str, Enum):
+    DRAFT = "DRAFT"
+    VALIDATING = "VALIDATING"
+    PUBLISHED = "PUBLISHED"
+    DEPRECATED = "DEPRECATED"
+    DISABLED = "DISABLED"
+
+
+class SkillExecutionStatus(str, Enum):
+    CREATED = "CREATED"
+    VALIDATING = "VALIDATING"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    WAITING = "WAITING"
+    VERIFYING = "VERIFYING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    CANCELLED = "CANCELLED"
+    ROLLED_BACK = "ROLLED_BACK"
+
+
+class FailureClassification(str, Enum):
+    TRANSIENT = "TRANSIENT"
+    PERMANENT = "PERMANENT"
+    POLICY_BLOCK = "POLICY_BLOCK"
+    SECURITY_BLOCK = "SECURITY_BLOCK"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    DEPENDENCY_FAILURE = "DEPENDENCY_FAILURE"
+    TIMEOUT = "TIMEOUT"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+    EMERGENCY_STOP = "EMERGENCY_STOP"
+    UNKNOWN = "UNKNOWN"
+
+
+class SkillActionType(str, Enum):
+    OBSERVE = "OBSERVE"
+    PLAN = "PLAN"
+    TOOL_CALL = "TOOL_CALL"
+    TRANSFORM = "TRANSFORM"
+    VALIDATE = "VALIDATE"
+    VERIFY = "VERIFY"
+    WAIT = "WAIT"
+    DECIDE = "DECIDE"
+    REPORT = "REPORT"
 
 
 # -------------------------------------------------------------------------
@@ -550,3 +598,210 @@ class CostRecord(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+# -------------------------------------------------------------------------
+# DISTRIBUTED SYSTEM STATE & EMERGENCY CONTROLS
+# -------------------------------------------------------------------------
+
+class SystemState(Base):
+    __tablename__ = "system_states"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    updated_by: Mapped[str] = mapped_column(String(128), default="SYSTEM", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+# -------------------------------------------------------------------------
+# SKILL REGISTRY & EXECUTION ENGINE
+# -------------------------------------------------------------------------
+
+class SkillDefinition(Base):
+    __tablename__ = "skill_definitions"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "version", name="uq_skill_definitions_skill_id_version"),
+        Index("ix_skill_definitions_skill_id_version", "skill_id", "version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    skill_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)  # SemVer: MAJOR.MINOR.PATCH
+    status: Mapped[SkillStatus] = mapped_column(SQLEnum(SkillStatus), default=SkillStatus.DRAFT, index=True, nullable=False)
+
+    # Schemas & Contract
+    input_schema: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    output_schema: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    prerequisites: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    required_capabilities: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    allowed_tool_names: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+
+    # Procedure & Verification
+    procedure: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    verification_procedure: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    failure_modes: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    rollback_strategy: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+
+    # Security & Guardrails
+    quality_requirements: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    security_constraints: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    permission_requirements: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    risk_class: Mapped[ToolRiskLevel] = mapped_column(SQLEnum(ToolRiskLevel), default=ToolRiskLevel.LOW, nullable=False)
+
+    # Planning & Resource Estimates
+    estimated_effort: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    expected_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reusable_components: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    evidence_requirements: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+
+    # Timestamps & Extensibility
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deprecated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    executions: Mapped[List["SkillExecution"]] = relationship("SkillExecution", back_populates="skill_definition", cascade="all, delete-orphan")
+
+
+class SkillExecution(Base):
+    __tablename__ = "skill_executions"
+    __table_args__ = (
+        Index("ix_skill_executions_skill_ver", "skill_id", "version"),
+        Index("ix_skill_executions_idempotency", "idempotency_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    skill_definition_id: Mapped[str] = mapped_column(String(36), ForeignKey("skill_definitions.id", ondelete="CASCADE"), nullable=False)
+    skill_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)  # Pinned SemVer
+
+    project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("project_tasks.id", ondelete="SET NULL"), nullable=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    status: Mapped[SkillExecutionStatus] = mapped_column(SQLEnum(SkillExecutionStatus), default=SkillExecutionStatus.CREATED, index=True, nullable=False)
+    current_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_steps: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+
+    input_payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    output_payload: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    checkpoint_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    evidence: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    metrics_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failure_class: Mapped[Optional[FailureClassification]] = mapped_column(SQLEnum(FailureClassification), nullable=True)
+
+    cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    skill_definition: Mapped["SkillDefinition"] = relationship("SkillDefinition", back_populates="executions")
+
+
+class SkillMetrics(Base):
+    __tablename__ = "skill_metrics"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "version", name="uq_skill_metrics_skill_id_version"),
+        Index("ix_skill_metrics_skill_id_version", "skill_id", "version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    skill_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    execution_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    verification_failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    total_duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reuse_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+# -------------------------------------------------------------------------
+# DATABASE IMMUTABILITY LISTENER FOR PUBLISHED SKILLS
+# -------------------------------------------------------------------------
+
+@event.listens_for(SkillDefinition, "before_update")
+def enforce_published_skill_immutability(mapper, connection, target: SkillDefinition):
+    """Guarantees at database engine boundary that a PUBLISHED skill cannot be mutated.
+    
+    Only transitioning status from PUBLISHED to DEPRECATED or DISABLED (and setting deprecated_at) is allowed.
+    All core specification fields and estimates are completely immutable once published.
+    Demoting back to DRAFT or VALIDATING is strictly prohibited.
+    """
+    from sqlalchemy.orm import attributes
+    state = attributes.instance_state(target)
+    history = state.get_history("status", True)
+    
+    was_published = False
+    if target.published_at is not None:
+        was_published = True
+    elif history.has_changes():
+        if history.deleted and history.deleted[0] == SkillStatus.PUBLISHED:
+            was_published = True
+    elif target.status == SkillStatus.PUBLISHED:
+        was_published = True
+
+    if was_published:
+        # 1. Enforce allowed status transitions: PUBLISHED -> PUBLISHED, DEPRECATED, or DISABLED
+        allowed_statuses = (SkillStatus.PUBLISHED, SkillStatus.DEPRECATED, SkillStatus.DISABLED)
+        if target.status not in allowed_statuses:
+            status_val = target.status.value if hasattr(target.status, "value") else str(target.status)
+            raise ValueError(
+                f"SkillImmutabilityViolation: Cannot transition published skill '{target.skill_id}' v{target.version} "
+                f"to '{status_val}'. Once published, a skill may only transition to DEPRECATED or DISABLED."
+            )
+
+        # 2. Check if any immutable definition field has been altered
+        immutable_fields = [
+            "skill_id",
+            "version",
+            "name",
+            "description",
+            "category",
+            "purpose",
+            "input_schema",
+            "output_schema",
+            "prerequisites",
+            "required_capabilities",
+            "allowed_tool_names",
+            "procedure",
+            "verification_procedure",
+            "failure_modes",
+            "rollback_strategy",
+            "security_constraints",
+            "permission_requirements",
+            "risk_class",
+            "estimated_effort",
+            "expected_duration_seconds",
+            "cost_estimate",
+            "reusable_components",
+            "evidence_requirements",
+        ]
+        for field in immutable_fields:
+            field_hist = state.get_history(field, True)
+            if field_hist.has_changes():
+                raise ValueError(
+                    f"SkillImmutabilityViolation: Cannot mutate '{field}' of published skill "
+                    f"'{target.skill_id}' v{target.version}. Published skills are strictly immutable. "
+                    f"You must register a new version."
+                )
+
+

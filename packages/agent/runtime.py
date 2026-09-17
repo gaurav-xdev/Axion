@@ -12,18 +12,52 @@ from packages.observability.logger import logger
 from packages.observability.metrics import AGENT_RUNS_COMPLETED, AGENT_RUNS_FAILED, AGENT_RUNS_TOTAL
 from packages.shared.config import settings
 from packages.shared.database import async_session_factory
+from packages.security.emergency import emergency_service
 from packages.shared.models import AgentRun, AgentRunStatus, AgentStep, ProjectTask, TaskStatus
 from packages.tools.base import ToolRequest
 from packages.tools.gateway import tool_gateway
 
 
-class EmergencyControlState:
-    is_paused: bool = False
-    is_stopped: bool = False
-    stop_outreach: bool = False
+class EmergencyControlProxy:
+    """Backwards-compatible proxy routing to authoritative distributed emergency service."""
+    @property
+    def is_paused(self) -> bool:
+        if emergency_service._cached_state:
+            return emergency_service._cached_state.is_paused
+        return False
+
+    @is_paused.setter
+    def is_paused(self, val: bool) -> None:
+        if not emergency_service._cached_state:
+            emergency_service._cached_state = EmergencyState()
+        emergency_service._cached_state.is_paused = val
+
+    @property
+    def is_stopped(self) -> bool:
+        if emergency_service._cached_state:
+            return emergency_service._cached_state.is_stopped
+        return False
+
+    @is_stopped.setter
+    def is_stopped(self, val: bool) -> None:
+        if not emergency_service._cached_state:
+            emergency_service._cached_state = EmergencyState()
+        emergency_service._cached_state.is_stopped = val
+
+    @property
+    def stop_outreach(self) -> bool:
+        if emergency_service._cached_state:
+            return emergency_service._cached_state.stop_outreach
+        return False
+
+    @stop_outreach.setter
+    def stop_outreach(self, val: bool) -> None:
+        if not emergency_service._cached_state:
+            emergency_service._cached_state = EmergencyState()
+        emergency_service._cached_state.stop_outreach = val
 
 
-emergency_controls = EmergencyControlState()
+emergency_controls = EmergencyControlProxy()
 
 
 class AgentRuntime:
@@ -68,9 +102,15 @@ class AgentRuntime:
         action_payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Executes a discrete step within an agent run, with tool gateway invocation and checkpointing."""
-        if emergency_controls.is_stopped:
-            logger.warning("Execution aborted: Emergency stop is ACTIVE.")
-            return {"status": "ABORTED", "reason": "Emergency stop active"}
+        # Authoritative Distributed Emergency Check
+        state = await emergency_service.get_state()
+        if state.is_stopped:
+            logger.warning("Execution aborted: Authoritative distributed Emergency Stop is ACTIVE.")
+            return {"status": "ABORTED", "reason": f"Emergency stop active: {state.reason}"}
+
+        if state.is_paused:
+            logger.info("Execution paused: Distributed Emergency Pause is ACTIVE.")
+            return {"status": "PAUSED", "reason": f"Emergency pause active: {state.reason}"}
 
         async with async_session_factory() as session:
             run = await session.get(AgentRun, run_id)

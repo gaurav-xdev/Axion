@@ -18,6 +18,27 @@ from packages.observability.metrics import (
 from packages.shared.config import settings
 
 
+LUA_SLIDING_WINDOW_RESERVATION = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+
+local cutoff = now - window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+local current_count = redis.call('ZCARD', key)
+
+if current_count < limit then
+    redis.call('ZADD', key, now, member)
+    redis.call('EXPIRE', key, math.ceil(window) + 5)
+    return {1, current_count + 1}
+else
+    return {0, current_count}
+end
+"""
+
+
 class NIMRateLimiter:
     """Centralized, shared rate limiter for NVIDIA NIM enforcing max 30 RPM globally."""
 
@@ -36,24 +57,32 @@ class NIMRateLimiter:
         self._redis_client: Optional[aioredis.Redis] = None
         self._local_lock = asyncio.Lock()
         self._local_timestamps: list[float] = []
+        self._redis_last_check: float = 0.0
+        self._redis_retry_interval: float = 10.0
 
     async def _get_redis(self) -> Optional[aioredis.Redis]:
-        if self._redis_client is None:
-            try:
-                client = aioredis.from_url(
-                    self.redis_url,
-                    encoding="utf-8",
-                    decode_responses=True,
-                    socket_connect_timeout=1.5,
-                )
-                await client.ping()
-                self._redis_client = client
-            except Exception as e:
-                logger.warning(
-                    f"Redis unavailable for NIM limiter ({e}). Using atomic in-process limiter fallback."
-                )
-                self._redis_client = None
-        return self._redis_client
+        if self._redis_client is not None:
+            return self._redis_client
+        now = time.time()
+        if now - self._redis_last_check < self._redis_retry_interval:
+            return None
+        self._redis_last_check = now
+        try:
+            client = aioredis.from_url(
+                self.redis_url,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=0.5,
+            )
+            await client.ping()
+            self._redis_client = client
+            return self._redis_client
+        except Exception as e:
+            logger.warning(
+                f"Redis unavailable for NIM limiter ({e}). Using atomic in-process limiter fallback."
+            )
+            self._redis_client = None
+            return None
 
     async def acquire_reservation(self, timeout: float = 90.0) -> bool:
         """Atomically reserve 1 NIM request slot within the rolling 60-second window.
@@ -76,28 +105,27 @@ class NIMRateLimiter:
 
                 redis = await self._get_redis()
                 if redis:
-                    # Redis Lua or pipeline sliding-window check
                     try:
-                        async with redis.pipeline(transaction=True) as pipe:
-                            # Remove entries older than 60 seconds
-                            pipe.zremrangebyscore(self.redis_key, "-inf", cutoff)
-                            # Get count of requests in current window
-                            pipe.zcard(self.redis_key)
-                            results = await pipe.execute()
-
-                        current_count = results[1]
+                        member_id = f"{now}:{random.random()}"
+                        res = await redis.eval(
+                            LUA_SLIDING_WINDOW_RESERVATION,
+                            1,
+                            self.redis_key,
+                            str(now),
+                            str(self.window_seconds),
+                            str(self.target_rpm),
+                            member_id,
+                        )
+                        granted = bool(res[0] == 1)
+                        current_count = int(res[1])
                         NIM_REQUESTS_LAST_60S.set(current_count)
 
-                        if current_count < self.target_rpm:
-                            # Reserve slot using unique score and member
-                            member_id = f"{now}:{random.random()}"
-                            await redis.zadd(self.redis_key, {member_id: now})
-                            await redis.expire(self.redis_key, self.window_seconds + 5)
+                        if granted:
                             wait_duration = time.monotonic() - start_time
                             NIM_WAIT_TIME_SECONDS.observe(wait_duration)
                             return True
                     except Exception as e:
-                        logger.warning(f"Redis pipeline error in NIM limiter: {e}")
+                        logger.warning(f"Redis Lua execution error in NIM limiter: {e}")
 
                 else:
                     # In-process sliding window fallback with strict asyncio lock

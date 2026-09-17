@@ -70,3 +70,15 @@ async def test_fastapi_endpoints_and_auth():
         audit_data = audit_res.json()
         assert audit_data["overall_secure"] is True
         assert len(audit_data["passes"]) == 5
+
+        # 7. Authenticated Skill API endpoints test
+        skills_res = await client.get("/api/v1/skills", headers=headers)
+        assert skills_res.status_code == 200
+        skills_list = skills_res.json()
+        assert len(skills_list) >= 1
+
+        # Test single skill fetch
+        skill_detail_res = await client.get("/api/v1/skills/research_business", headers=headers)
+        assert skill_detail_res.status_code == 200
+        assert skill_detail_res.json()["skill_id"] == "research_business"
+        assert "procedure" in skill_detail_res.json()
