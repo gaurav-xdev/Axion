@@ -30,6 +30,7 @@ from packages.projects.prospecting import ProspectData, prospecting_engine
 from packages.qa.worker import QAEvaluationRequest, qa_worker
 from packages.shared.config import settings
 from packages.shared.database import async_session_factory
+from packages.shared.exceptions import ProviderNotConfiguredError
 from packages.shared.models import (
     Artifact,
     ChannelType,
@@ -51,7 +52,13 @@ from packages.tools.filesystem import resolve_sandboxed_path
 class AutonomousLifecycleEngine:
     """Executes the complete autonomous pipeline across commercial, payment, and deliverable stages."""
 
-    async def run_autonomous_cycle(self, business_name: str, domain: str, lead_email: str) -> Dict[str, Any]:
+    async def run_autonomous_cycle(
+        self,
+        business_name: str,
+        domain: str,
+        lead_email: str,
+        contact_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Runs an end-to-end autonomous commercial and technical delivery cycle."""
         logger.info(f"Initiating autonomous business cycle for {business_name} ({domain})...")
 
@@ -59,7 +66,7 @@ class AutonomousLifecycleEngine:
         prospect_data = ProspectData(
             business_name=business_name,
             website=f"https://{domain}",
-            contact_name=f"Lead at {business_name}",
+            contact_name=contact_name,
             contact_email=lead_email,
             observed_pain_points=["No automated lead webhook integration", "Missing dynamic API quotes"],
             evidence_urls=[f"https://{domain}/contact", f"https://{domain}/pricing"],
@@ -86,7 +93,7 @@ class AutonomousLifecycleEngine:
             client = (await session.execute(stmt)).scalar_one_or_none()
             if not client:
                 client = Client(
-                    name=f"{business_name} Rep",
+                    name=contact_name or business_name,
                     email=lead_email,
                     company=business_name,
                 )
@@ -147,6 +154,13 @@ class AutonomousLifecycleEngine:
         logger.info(f"One-time project checkout created: {chk_res.checkout_id}")
 
         # 7. SERVER-SIDE PAYMENT VERIFICATION (Cryptographically Signed Webhook)
+        webhook_secret = settings.DODO_WEBHOOK_SECRET
+        if not webhook_secret:
+            raise ProviderNotConfiguredError(
+                "DODO_WEBHOOK_SECRET",
+                "Cryptographic webhook secret is required for server-side payment verification",
+            )
+
         simulated_event_id = f"evt_{project_id[:8]}"
         webhook_payload = {
             "event_id": simulated_event_id,
@@ -158,12 +172,13 @@ class AutonomousLifecycleEngine:
             },
         }
         raw_body = json.dumps(webhook_payload).encode()
-        secret = settings.DODO_WEBHOOK_SECRET or settings.APP_SECRET
-        sig = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        sig = hmac.new(webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
 
         verified, msg = await payment_verification_service.process_webhook(
             raw_body=raw_body, signature=sig, event_data=webhook_payload
         )
+        if not verified:
+            raise RuntimeError(f"Server-side payment verification failed: {msg}")
         logger.info(f"Server-side payment verification: {verified}, {msg}")
 
         # 8. AUTONOMOUS PROJECT PLANNING

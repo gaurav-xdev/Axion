@@ -20,6 +20,10 @@ from packages.observability.logger import logger
 from packages.observability.metrics import TOOL_FAILURES
 from packages.security.emergency import emergency_service
 from packages.shared.database import async_session_factory
+from packages.shared.exceptions import (
+    MissingRequiredContextError,
+    UnsupportedActionError,
+)
 from packages.shared.models import (
     AuditEvent,
     FailureClassification,
@@ -220,6 +224,14 @@ class SkillExecutionEngine:
             execution_failed = True
             failure_reason = f"Execution exceeded total timeout of {req.timeout_seconds}s"
             failure_class = FailureClassification.TIMEOUT
+        except MissingRequiredContextError as ex:
+            execution_failed = True
+            failure_reason = str(ex)
+            failure_class = FailureClassification.VALIDATION_ERROR
+        except UnsupportedActionError as ex:
+            execution_failed = True
+            failure_reason = str(ex)
+            failure_class = FailureClassification.POLICY_BLOCK
         except Exception as ex:
             execution_failed = True
             failure_reason = f"Unexpected execution error: {str(ex)}"
@@ -384,8 +396,61 @@ class SkillExecutionEngine:
             except Exception as ex:
                 return (None, None, f"Tool invocation crashed: {ex}")
 
-        # Default fallback for PLAN / REPORT
-        return ({"status": "step_executed", "step_id": step.step_id}, {}, None)
+        elif step.action_type == SkillActionType.PLAN:
+            merged = {**input_data}
+            for v in accumulated_outputs.values():
+                if isinstance(v, dict):
+                    merged.update(v)
+            plan_obj = {
+                "step_id": step.step_id,
+                "goal": step.description,
+                "status": "PLANNED",
+                "planned_at": datetime.now(timezone.utc).isoformat(),
+                "context_keys": list(merged.keys()),
+            }
+            return (plan_obj, {"planned_step": step.step_id}, None)
+
+        elif step.action_type == SkillActionType.DECIDE:
+            merged = {**input_data}
+            for v in accumulated_outputs.values():
+                if isinstance(v, dict):
+                    merged.update(v)
+            feasible = merged.get("feasible", True)
+            decision_obj = {
+                "step_id": step.step_id,
+                "decision": "PROCEED" if feasible else "ABORT",
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return (decision_obj, {"decision": decision_obj["decision"]}, None)
+
+        elif step.action_type == SkillActionType.WAIT:
+            wait_seconds = step.parameters.get("wait_seconds", 0) if step.parameters else 0
+            if wait_seconds > 0:
+                await asyncio.sleep(min(float(wait_seconds), 10.0))
+            return ({"waited_seconds": wait_seconds, "status": "RESUMED"}, {}, None)
+
+        elif step.action_type == SkillActionType.VERIFY:
+            for req_in in step.required_inputs:
+                if req_in not in input_data and req_in not in accumulated_outputs:
+                    return (None, None, f"Verification failed: required input '{req_in}' missing in step '{step.step_id}'")
+            return ({"verified": True, "step_id": step.step_id}, {"verified_at": datetime.now(timezone.utc).isoformat()}, None)
+
+        elif step.action_type == SkillActionType.REPORT:
+            merged = {**input_data}
+            for v in accumulated_outputs.values():
+                if isinstance(v, dict):
+                    merged.update(v)
+            report_obj = {
+                "step_id": step.step_id,
+                "skill_name": skill.name,
+                "summary": f"Completed procedure step {step.step_id}",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "output_keys": list(merged.keys()),
+            }
+            return (report_obj, {"reported_step": step.step_id}, None)
+
+        else:
+            raise UnsupportedActionError(str(step.action_type), step_id=step.step_id)
 
     def _execute_transform_action(
         self,
@@ -404,11 +469,13 @@ class SkillExecutionEngine:
         step_id = step.step_id
 
         if step_id in ("synthesize_findings", "observe_domain"):
-            domain = merged.get("domain", "example.com")
-            b_name = merged.get("business_name", domain)
-            pain_points = merged.get("pain_points") or [
-                "Manual invoice sync and client data reconciliation",
-                "Delayed response time to inbound inquiries",
+            domain = merged.get("domain")
+            if not domain:
+                raise MissingRequiredContextError("domain", step_id=step.step_id)
+            b_name = merged.get("business_name") or domain
+            pain_points = merged.get("pain_points") or merged.get("observed_pain_points") or [
+                f"Workflow integration opportunities at {domain}",
+                f"Inbound lead intake automation potential for {b_name}",
             ]
             result["domain"] = domain
             result["business_name"] = b_name
@@ -422,16 +489,23 @@ class SkillExecutionEngine:
         elif step_id in ("compute_pricing", "calculate_effort_and_pricing"):
             proj_type = merged.get("project_type", "AUTOMATION")
             integrations = int(merged.get("integration_count", 1))
-            base_hours = 6.0 if proj_type.upper() == "AUTOMATION" else 10.0
+            base_hours = 6.0 if str(proj_type).upper() == "AUTOMATION" else 10.0
             estimated_hours = round(base_hours + integrations * 3.5, 1)
-            hourly_rate = 75.0
+            hourly_rate = float(merged.get("hourly_rate", 75.0))
             result["estimated_hours"] = estimated_hours
             result["quoted_price"] = round(estimated_hours * hourly_rate, 2)
 
         elif step_id in ("format_proposal", "compose_proposal"):
-            client = merged.get("client_name", "Valued Client")
-            scope = merged.get("scope_summary", "Implementation of automated business integrations")
-            price = float(merged.get("price", 450.0))
+            client = merged.get("client_name")
+            if not client:
+                raise MissingRequiredContextError("client_name", step_id=step.step_id)
+            scope = merged.get("scope_summary")
+            if not scope:
+                raise MissingRequiredContextError("scope_summary", step_id=step.step_id)
+            price_val = merged.get("price") or merged.get("quoted_price")
+            if price_val is None:
+                raise MissingRequiredContextError("price", step_id=step.step_id)
+            price = float(price_val)
             result["proposal_text"] = (
                 f"# Formal Project Proposal: {client}\n\n"
                 f"## 1. Scope of Work\n{scope}\n\n"
@@ -446,7 +520,10 @@ class SkillExecutionEngine:
             result["status"] = "DRAFTED"
 
         elif step_id in ("create_workflow_structure", "construct_workflow_spec"):
-            wf_name = merged.get("workflow_name", "business_automation")
+            wf_name = merged.get("workflow_name")
+            if not wf_name:
+                raise MissingRequiredContextError("workflow_name", step_id=step.step_id)
+            crm_url = merged.get("crm_api_url") or f"https://api.{merged.get('domain', 'internal.local')}/v1/leads"
             workflow_json = {
                 "name": wf_name,
                 "nodes": [
@@ -466,7 +543,7 @@ class SkillExecutionEngine:
                         "name": "CRM Sync",
                         "type": "n8n-nodes-base.httpRequest",
                         "position": [600, 300],
-                        "parameters": {"method": "POST", "url": "https://api.crm.local/v1/leads"},
+                        "parameters": {"method": "POST", "url": crm_url},
                     },
                 ],
                 "connections": {
@@ -503,8 +580,12 @@ class SkillExecutionEngine:
             result["language"] = "python"
 
         elif step_id in ("build_client", "generate_api_client"):
-            api_name = merged.get("target_api_name", "ExternalAPI")
-            base_url = merged.get("base_url", "https://api.example.com")
+            api_name = merged.get("target_api_name")
+            if not api_name:
+                raise MissingRequiredContextError("target_api_name", step_id=step.step_id)
+            base_url = merged.get("base_url")
+            if not base_url:
+                raise MissingRequiredContextError("base_url", step_id=step.step_id)
             class_name = "".join(part.capitalize() for part in api_name.replace("-", "_").split("_")) + "Client"
             result["client_code"] = (
                 f'"""Async REST API Client for {api_name}."""\n'
@@ -528,8 +609,10 @@ class SkillExecutionEngine:
             )
 
         elif step_id in ("render_template", "generate_landing_html"):
-            headline = merged.get("headline", "Next-Gen Autonomous Workflow Engine")
-            cta = merged.get("cta_text", "Schedule Consultation")
+            headline = merged.get("headline")
+            if not headline:
+                raise MissingRequiredContextError("headline", step_id=step.step_id)
+            cta = merged.get("cta_text") or "Schedule Consultation"
             result["html_content"] = (
                 f'<!DOCTYPE html>\n'
                 f'<html lang="en">\n'
@@ -550,7 +633,7 @@ class SkillExecutionEngine:
             )
 
         elif step_id in ("compose_dashboard", "generate_dashboard_spec"):
-            title = merged.get("dashboard_title", "Business Operational Metrics")
+            title = merged.get("dashboard_title") or "Business Operational Metrics"
             metric_keys = merged.get("metric_keys", ["revenue_usd", "active_projects", "conversion_rate"])
             result["dashboard_spec"] = {
                 "title": title,
@@ -568,7 +651,9 @@ class SkillExecutionEngine:
             }
 
         elif step_id in ("bundle_artifacts", "create_bundle_manifest"):
-            proj_id = merged.get("project_id", "default_proj")
+            proj_id = merged.get("project_id")
+            if not proj_id:
+                raise MissingRequiredContextError("project_id", step_id=step.step_id)
             artifacts = merged.get("artifacts", ["index.html", "delivery_spec.json"])
             result["bundle_manifest"] = {
                 "project_id": proj_id,
@@ -662,16 +747,22 @@ class SkillExecutionEngine:
         elif tool_name == "filesystem.list":
             tool_args["subpath"] = merged_ctx.get("subpath") or merged_ctx.get("path") or "."
 
-        elif tool_name == "qa.evaluate":
-            tool_args["project_id"] = merged_ctx.get("project_id", "default_project")
-            tool_args["artifact_id"] = merged_ctx.get("artifact_id", "deliverable_1")
+        elif tool_name in ("qa.evaluate", "qa.evaluate_deliverable"):
+            proj_id = merged_ctx.get("project_id")
+            if not proj_id:
+                raise MissingRequiredContextError("project_id", step_id=step.step_id)
+            art_id = merged_ctx.get("artifact_id") or f"artifact_{step.step_id}"
             path = merged_ctx.get("artifact_path") or merged_ctx.get("path")
             if not path:
                 for prev_step_out in accumulated.values():
                     if isinstance(prev_step_out, dict) and "path" in prev_step_out:
                         path = prev_step_out["path"]
                         break
-            tool_args["artifact_path"] = path or "artifacts/index.html"
+            if not path:
+                raise MissingRequiredContextError("artifact_path", step_id=step.step_id)
+            tool_args["project_id"] = proj_id
+            tool_args["artifact_id"] = art_id
+            tool_args["artifact_path"] = path
             tool_args["artifact_type"] = merged_ctx.get("artifact_type", "CODE")
             tool_args["expected_criteria"] = merged_ctx.get("expected_criteria", [])
 
@@ -679,13 +770,21 @@ class SkillExecutionEngine:
             url = merged_ctx.get("url")
             if not url and "domain" in merged_ctx:
                 url = f"https://{merged_ctx['domain']}"
-            tool_args["url"] = url or "https://example.com"
+            if not url:
+                raise MissingRequiredContextError("url", step_id=step.step_id)
+            tool_args["url"] = url
             tool_args["extract_selectors"] = merged_ctx.get("extract_selectors", ["title", "h1", "nav", "footer", "a[href*='contact']"])
             tool_args["capture_screenshot"] = merged_ctx.get("capture_screenshot", False)
 
         elif tool_name == "communication.dispatch":
-            tool_args["recipient"] = merged_ctx.get("recipient", "client@example.com")
-            tool_args["content"] = merged_ctx.get("content") or merged_ctx.get("proposal_text") or "Project update notice"
+            recipient = merged_ctx.get("recipient") or merged_ctx.get("client_email") or merged_ctx.get("lead_email")
+            if not recipient:
+                raise MissingRequiredContextError("recipient", step_id=step.step_id)
+            content = merged_ctx.get("content") or merged_ctx.get("proposal_text")
+            if not content:
+                raise MissingRequiredContextError("content", step_id=step.step_id)
+            tool_args["recipient"] = recipient
+            tool_args["content"] = content
             tool_args["subject"] = merged_ctx.get("subject", "Project Notification")
             tool_args["channel"] = merged_ctx.get("channel", "EMAIL")
 

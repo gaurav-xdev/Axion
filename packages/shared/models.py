@@ -128,6 +128,24 @@ class ChannelType(str, Enum):
     SYSTEM = "SYSTEM"
 
 
+class MessageDeliveryStatus(str, Enum):
+    DRAFT = "DRAFT"
+    QUEUED = "QUEUED"
+    SENDING = "SENDING"
+    SENT = "SENT"
+    DELIVERED = "DELIVERED"
+    BOUNCED = "BOUNCED"
+    FAILED = "FAILED"
+    OPTED_OUT = "OPTED_OUT"
+
+
+class RequirementCertainty(str, Enum):
+    CLIENT_STATED = "CLIENT_STATED"
+    INFERRED = "INFERRED"
+    ASSUMED = "ASSUMED"
+    UNKNOWN = "UNKNOWN"
+
+
 class SkillStatus(str, Enum):
     DRAFT = "DRAFT"
     VALIDATING = "VALIDATING"
@@ -333,6 +351,7 @@ class Requirement(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     priority: Mapped[str] = mapped_column(String(32), default="HIGH", nullable=False)
+    certainty: Mapped[str] = mapped_column(String(32), default="CLIENT_STATED", nullable=False)
     acceptance_criteria: Mapped[Optional[List[str]]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

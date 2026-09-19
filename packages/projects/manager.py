@@ -87,6 +87,12 @@ class ProjectPlanningEngine:
             target_artifact_path = artifact_paths.get(primary_skill, "artifacts/deliverable.json")
             target_artifact_type = "CODE" if target_artifact_path.endswith(".py") else ("N8N" if "workflow" in target_artifact_path else "REPORT")
 
+            # Dynamic extraction from project context and requirements
+            import re
+            combined_desc = f"{project.name} {project.description} " + " ".join(r.description for r in requirements)
+            url_match = re.search(r"https?://[^\s'\"]+", combined_desc)
+            resolved_base_url = url_match.group(0) if url_match else f"https://api.{project.name.lower().replace(' ', '')}.local"
+
             # MILESTONE 1: Deliverable Engineering
             task_eng = ProjectTask(
                 project_id=project_id,
@@ -99,8 +105,10 @@ class ProjectPlanningEngine:
                     "trigger_type": "webhook",
                     "endpoint_path": f"/webhooks/{project_id[:8]}",
                     "secret_env_var": "WEBHOOK_SECRET",
-                    "target_api_name": "ClientAPI",
-                    "base_url": "https://api.external.local",
+                    "target_api_name": f"{project.name.replace(' ', '')}Client",
+                    "base_url": resolved_base_url,
+                    "crm_api_url": f"{resolved_base_url}/v1/leads",
+                    "domain": project.name.lower().replace(" ", "") + ".com",
                     "headline": project.name,
                     "cta_text": "Get Started",
                     "dashboard_title": project.name,

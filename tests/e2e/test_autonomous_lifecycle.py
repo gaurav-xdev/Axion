@@ -33,6 +33,9 @@ async def test_full_autonomous_business_cycle(monkeypatch):
         )
 
     monkeypatch.setattr(dodo_provider, "create_checkout", mock_create_checkout)
+    from packages.shared.config import settings
+    monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", "test_webhook_secret_key_12345")
+    monkeypatch.setattr(dodo_provider, "webhook_secret", "test_webhook_secret_key_12345")
     uid = str(uuid.uuid4())[:8]
 
     # Execute full autonomous lifecycle

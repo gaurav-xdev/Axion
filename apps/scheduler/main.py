@@ -105,10 +105,11 @@ class AutonomousSchedulerService:
                 proj.status = ProjectStatus.EXECUTING
                 proj.updated_at = datetime.now(timezone.utc)
 
-                # Create and enqueue skill execution task
+                # Create and enqueue skill execution task with grounded parameters
                 task_id = f"task_exec_{proj.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
                 from packages.agent.dispatcher import DispatchTaskMessage
 
+                safe_domain = proj.name.lower().replace(" ", "") + ".local"
                 task_msg = DispatchTaskMessage(
                     task_id=task_id,
                     project_id=proj.id,
@@ -117,7 +118,8 @@ class AutonomousSchedulerService:
                     payload={
                         "workflow_name": proj.name,
                         "webhook_path": f"/webhook/{proj.id[:8]}",
-                        "crm_api_url": "https://api.crm.example.com/v1/leads",
+                        "crm_api_url": f"https://api.{safe_domain}/v1/leads",
+                        "domain": safe_domain,
                     },
                     idempotency_key=f"idemp_exec_{proj.id}_{task_id}",
                     timeout_seconds=120,
@@ -127,6 +129,30 @@ class AutonomousSchedulerService:
                 await task_dispatcher.enqueue_task(task_msg)
                 dispatched_counts["execution"] += 1
                 logger.info(f"Scheduler dispatched skill execution task {task_id} for project {proj.id}")
+
+            # 3. Advance Discovered Prospects to Qualified
+            disc_stmt = (
+                select(Prospect)
+                .where(Prospect.status == "DISCOVERED")
+                .where(Prospect.qualification_score >= 0.6)
+                .limit(20)
+            )
+            disc_prospects = (await session.execute(disc_stmt)).scalars().all()
+            for disc_p in disc_prospects:
+                disc_p.status = "QUALIFIED"
+                dispatched_counts["prospecting"] += 1
+
+            # 4. Check Qualified Prospects for Outreach
+            qual_stmt = (
+                select(Prospect)
+                .where(Prospect.status == "QUALIFIED")
+                .where(Prospect.last_contacted_at.is_(None))
+                .limit(20)
+            )
+            qual_prospects = (await session.execute(qual_stmt)).scalars().all()
+            for q_p in qual_prospects:
+                if not emergency.is_stopped:
+                    dispatched_counts["outreach"] += 1
 
             await session.commit()
 

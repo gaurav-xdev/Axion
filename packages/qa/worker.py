@@ -5,7 +5,7 @@ Independently verifies worker deliverables, creates QARun and QAFinding records,
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from packages.observability.logger import logger
@@ -260,6 +260,39 @@ class QAWorker:
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed persisting QA run records: {e}")
+
+    async def execute_sandbox_test(self, test_file_path: Path, timeout_seconds: float = 20.0) -> Tuple[bool, str]:
+        """Executes a test file in an isolated Python subprocess without polluting the host."""
+        import sys
+        import asyncio
+        if not test_file_path.exists():
+            return False, f"Test file '{test_file_path}' does not exist"
+
+        cmd = [sys.executable, "-m", "pytest", str(test_file_path), "-v"]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+            if proc.returncode == 0:
+                return True, stdout
+            else:
+                return False, stderr or stdout
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False, f"Test execution timed out after {timeout_seconds}s"
+        except Exception as e:
+            return False, f"Failed spawning test subprocess: {e}"
 
 
 # Global singleton

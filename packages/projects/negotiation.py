@@ -39,6 +39,7 @@ class ExtractedRequirements(BaseModel):
     acceptance_criteria: List[str] = Field(default_factory=list)
     technical_constraints: List[str] = Field(default_factory=list)
     unresolved_unknowns: List[str] = Field(default_factory=list)
+    tagged_requirements: List[Dict[str, str]] = Field(default_factory=list)
     estimated_integration_count: int = 1
     estimated_effort_hours: float = 4.0
     ready_for_quote: bool = True
@@ -82,27 +83,99 @@ class RequirementsExtractor:
             proj_type = "AUTOMATION"
             title = ctx.get("title") or "Business Workflow Automation"
 
-        # 2. Extract Deliverables
+        # 2. Extract Deliverables with Certainty Tagging
         deliverables: List[str] = []
+        tagged_requirements: List[Dict[str, str]] = []
+
         if proj_type == "AUTOMATION":
             deliverables.append("Production-ready n8n workflow JSON configuration")
+            tagged_requirements.append({
+                "title": "n8n Workflow Configuration",
+                "description": "Production-ready n8n workflow JSON configuration",
+                "certainty": "CLIENT_STATED",
+            })
             deliverables.append("Tested webhook inbound trigger and payload transformer")
+            tagged_requirements.append({
+                "title": "Inbound Webhook Trigger",
+                "description": "Tested webhook inbound trigger and payload transformer",
+                "certainty": "INFERRED",
+            })
             deliverables.append("Error notification dispatch handler")
+            tagged_requirements.append({
+                "title": "Error Dispatch Handler",
+                "description": "Error notification dispatch handler",
+                "certainty": "INFERRED",
+            })
         elif proj_type == "WEBHOOK":
             deliverables.append("FastAPI production webhook route handler")
+            tagged_requirements.append({
+                "title": "FastAPI Webhook Route",
+                "description": "FastAPI production webhook route handler",
+                "certainty": "CLIENT_STATED",
+            })
             deliverables.append("Cryptographic HMAC SHA-256 signature verification")
+            tagged_requirements.append({
+                "title": "HMAC SHA-256 Verification",
+                "description": "Cryptographic HMAC SHA-256 signature verification",
+                "certainty": "INFERRED",
+            })
             deliverables.append("Sandbox integration test verifying valid and rejected signatures")
+            tagged_requirements.append({
+                "title": "Sandbox Verification Suite",
+                "description": "Sandbox integration test verifying valid and rejected signatures",
+                "certainty": "ASSUMED",
+            })
         elif proj_type == "INTEGRATION":
             deliverables.append("Async Python httpx client with connection pooling and retries")
+            tagged_requirements.append({
+                "title": "Async REST Client",
+                "description": "Async Python httpx client with connection pooling and retries",
+                "certainty": "CLIENT_STATED",
+            })
             deliverables.append("Authentication header injection and token refresh logic")
+            tagged_requirements.append({
+                "title": "Auth Header Injection",
+                "description": "Authentication header injection and token refresh logic",
+                "certainty": "INFERRED",
+            })
             deliverables.append("Comprehensive error handling and status code mapping")
+            tagged_requirements.append({
+                "title": "Error Handling & Status Mapping",
+                "description": "Comprehensive error handling and status code mapping",
+                "certainty": "INFERRED",
+            })
         elif proj_type == "FRONTEND":
             deliverables.append("Clean semantic HTML5 / Tailwind responsive page")
+            tagged_requirements.append({
+                "title": "Semantic HTML5 Page",
+                "description": "Clean semantic HTML5 / Tailwind responsive page",
+                "certainty": "CLIENT_STATED",
+            })
             deliverables.append("Mobile-first viewport layout with conversion CTA")
+            tagged_requirements.append({
+                "title": "Mobile Viewport Layout",
+                "description": "Mobile-first viewport layout with conversion CTA",
+                "certainty": "INFERRED",
+            })
             deliverables.append("Zero placeholder markers or broken assets")
+            tagged_requirements.append({
+                "title": "Asset Integrity",
+                "description": "Zero placeholder markers or broken assets",
+                "certainty": "ASSUMED",
+            })
         elif proj_type == "DASHBOARD":
             deliverables.append("Interactive dashboard layout JSON specification")
+            tagged_requirements.append({
+                "title": "Dashboard Specification",
+                "description": "Interactive dashboard layout JSON specification",
+                "certainty": "CLIENT_STATED",
+            })
             deliverables.append("Metric widget configurations and refresh schedules")
+            tagged_requirements.append({
+                "title": "Metric Widgets",
+                "description": "Metric widget configurations and refresh schedules",
+                "certainty": "INFERRED",
+            })
 
         # 3. Define Acceptance Criteria
         criteria: List[str] = [
@@ -124,8 +197,18 @@ class RequirementsExtractor:
         # Identify missing specifications
         if proj_type == "INTEGRATION" and not any(k in text_lower for k in ["stripe", "hubspot", "airtable", "salesforce", "api"]):
             unknowns.append("Target API documentation URL and authentication mechanism")
+            tagged_requirements.append({
+                "title": "Target API Documentation",
+                "description": "Missing target API documentation URL and authentication credentials",
+                "certainty": "UNKNOWN",
+            })
         if proj_type == "WEBHOOK" and "secret" not in text_lower:
             unknowns.append("Webhook provider signature header name and hashing algorithm")
+            tagged_requirements.append({
+                "title": "Webhook Secret Specification",
+                "description": "Missing signature header name and secret key environment variable",
+                "certainty": "UNKNOWN",
+            })
 
         # Estimate integration count and effort
         integrations = 1
@@ -143,6 +226,7 @@ class RequirementsExtractor:
             acceptance_criteria=criteria,
             technical_constraints=constraints,
             unresolved_unknowns=unknowns,
+            tagged_requirements=tagged_requirements,
             estimated_integration_count=integrations,
             estimated_effort_hours=effort,
             ready_for_quote=ready,
@@ -289,14 +373,24 @@ class BoundedNegotiationEngine:
             )
             session.add(quote)
 
-            # Persist individual requirements
-            for idx, req_text in enumerate(requirements):
+            # Persist individual requirements with certainty
+            for idx, req_item in enumerate(requirements):
+                if isinstance(req_item, dict):
+                    title = req_item.get("title", f"Requirement {idx + 1}")
+                    desc = req_item.get("description", str(req_item))
+                    certainty = req_item.get("certainty", "CLIENT_STATED")
+                else:
+                    title = f"Requirement {idx + 1}"
+                    desc = str(req_item)
+                    certainty = "CLIENT_STATED"
+
                 req_row = Requirement(
                     project_id=project_id,
-                    title=f"Requirement {idx + 1}",
-                    description=req_text,
+                    title=title,
+                    description=desc,
                     priority="HIGH",
-                    acceptance_criteria=[f"Verified: {req_text}"],
+                    certainty=certainty,
+                    acceptance_criteria=[f"Verified: {desc}"],
                     status="PENDING",
                 )
                 session.add(req_row)

@@ -48,6 +48,15 @@ async def init_db() -> None:
     """Initialize all database tables defined in SQLAlchemy models."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in settings.DATABASE_URL:
+            from sqlalchemy import text
+            try:
+                res = await conn.execute(text("PRAGMA table_info(requirements);"))
+                columns = [row[1] for row in res.fetchall()]
+                if columns and "certainty" not in columns:
+                    await conn.execute(text("ALTER TABLE requirements ADD COLUMN certainty VARCHAR(32) DEFAULT 'CLIENT_STATED' NOT NULL;"))
+            except Exception:
+                pass
 
 
 async def close_db() -> None:

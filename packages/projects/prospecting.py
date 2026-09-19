@@ -91,13 +91,13 @@ class ProspectingEngine:
             session.add(new_prospect)
             await session.flush()
 
-            # Add contact if provided
+            # Add contact only if real contact information was provided
             if data.contact_name or data.contact_email:
                 contact = Contact(
                     prospect_id=new_prospect.id,
-                    name=data.contact_name or "Contact Person",
+                    name=data.contact_name or "",
                     email=data.contact_email or "",
-                    is_decision_maker=True if data.contact_name else False,
+                    is_decision_maker=bool(data.contact_name),
                 )
                 session.add(contact)
 
@@ -151,7 +151,7 @@ class ProspectingEngine:
         prospect_data = ProspectData(
             business_name=resolved_name,
             website=target_url,
-            contact_name=f"Lead at {resolved_name}",
+            contact_name=None,
             contact_email=contact_email,
             observed_pain_points=observed_pain_points,
             evidence_urls=evidence_urls,
