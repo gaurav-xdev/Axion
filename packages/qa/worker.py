@@ -44,7 +44,22 @@ class QAWorker:
         logger.info(f"QA Worker evaluating artifact {req.artifact_id} for project {req.project_id}")
 
         findings: List[Dict[str, str]] = []
-        p = Path(req.artifact_path)
+        raw_p = Path(req.artifact_path)
+        workspace_base = Path("workspace").resolve()
+        artifacts_base = Path("artifacts").resolve()
+
+        # Resolve path candidate relative to project sandbox or repo root if relative
+        if raw_p.is_absolute():
+            p = raw_p.resolve()
+        else:
+            safe_proj = "".join(c for c in req.project_id if c.isalnum() or c in ("-", "_")) if req.project_id else ""
+            proj_sandbox = (workspace_base / "projects" / safe_proj).resolve() if safe_proj else workspace_base
+            if (proj_sandbox / raw_p).exists():
+                p = (proj_sandbox / raw_p).resolve()
+            elif raw_p.exists():
+                p = raw_p.resolve()
+            else:
+                p = (proj_sandbox / raw_p).resolve()
 
         # CHECK 1: Input & Schema Validation
         c1_valid = True
@@ -60,7 +75,14 @@ class QAWorker:
         # CHECK 2: Security & Policy Compliance
         c2_valid = True
         # Check for path traversal or leaked secrets in artifact
-        if ".." in req.artifact_path or not req.artifact_path.startswith(("workspace", "artifacts", "./workspace")):
+        is_sandbox_confined = False
+        try:
+            if ".." not in str(raw_p) and (p.is_relative_to(workspace_base) or p.is_relative_to(artifacts_base)):
+                is_sandbox_confined = True
+        except (ValueError, AttributeError):
+            is_sandbox_confined = False
+
+        if not is_sandbox_confined:
             c2_valid = False
             findings.append({
                 "severity": "CRITICAL",

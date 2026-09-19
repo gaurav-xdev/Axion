@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = Field(default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30)
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7)
+    ADMIN_INITIAL_PASSWORD: Optional[str] = Field(default=None)
 
     # Database
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./workspace/agent_dev.db")

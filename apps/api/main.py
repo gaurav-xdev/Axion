@@ -58,16 +58,27 @@ async def lifespan(app: FastAPI):
         stmt = select(User).where(User.email == "admin@autonomousagency.local")
         admin = (await session.execute(stmt)).scalar_one_or_none()
         if not admin:
-            admin_user = User(
-                email="admin@autonomousagency.local",
-                hashed_password=hash_password("AdminSecurePassword2026!"),
-                full_name="Principal Administrator",
-                role=UserRole.OWNER,
-                is_active=True,
-            )
-            session.add(admin_user)
-            await session.commit()
-            logger.info("Created default system administrator account: admin@autonomousagency.local")
+            initial_password = settings.ADMIN_INITIAL_PASSWORD
+            if not initial_password:
+                if settings.APP_ENV == "production":
+                    logger.critical(
+                        "CRITICAL SECURITY: ADMIN_INITIAL_PASSWORD environment variable is not configured in production. "
+                        "Skipping default admin account creation to prevent unauthorized default credentials."
+                    )
+                else:
+                    initial_password = "AdminSecurePassword2026!"
+
+            if initial_password:
+                admin_user = User(
+                    email="admin@autonomousagency.local",
+                    hashed_password=hash_password(initial_password),
+                    full_name="Principal Administrator",
+                    role=UserRole.OWNER,
+                    is_active=True,
+                )
+                session.add(admin_user)
+                await session.commit()
+                logger.info("Created system administrator account: admin@autonomousagency.local")
 
     # Seed and publish initial canonical starter skills if missing
     try:
@@ -436,6 +447,53 @@ async def dodo_webhook_receiver(
         raise HTTPException(status_code=400, detail=msg)
 
     return {"status": "accepted", "message": msg}
+
+
+# -------------------------------------------------------------------------
+# INBOUND COMMUNICATIONS WEBHOOK ENDPOINT
+# -------------------------------------------------------------------------
+
+@app.post("/webhooks/communications/inbound")
+async def inbound_communication_webhook(
+    request: Request,
+):
+    """Ingests inbound client communications (email / webhook / chat).
+    Processes message through ConversationEngine with intent classification and state transition.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    from packages.communications.conversation import InboundMessagePayload, conversation_engine
+    from packages.shared.models import ChannelType
+
+    sender = body.get("sender") or body.get("from") or body.get("email")
+    content = body.get("content") or body.get("text") or body.get("body")
+    recipient = body.get("recipient") or body.get("to") or "agent@autonomousagency.local"
+    channel_str = body.get("channel", "EMAIL").upper()
+    channel = ChannelType[channel_str] if channel_str in ChannelType.__members__ else ChannelType.EMAIL
+
+    if not sender or not content:
+        raise HTTPException(status_code=422, detail="Missing required 'sender' or 'content' in message payload")
+
+    payload = InboundMessagePayload(
+        sender=str(sender),
+        recipient=str(recipient),
+        channel=channel,
+        content=str(content),
+        subject=body.get("subject"),
+    )
+
+    result = await conversation_engine.ingest_inbound_message(payload)
+    return {
+        "status": "processed",
+        "conversation_id": result.conversation_id,
+        "classification": result.classification.value,
+        "response_sent": result.response_sent,
+        "suggested_next_action": result.suggested_next_action,
+    }
+
 
 
 # -------------------------------------------------------------------------

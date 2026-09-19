@@ -1,9 +1,14 @@
 """Autonomous Business Agent Lifecycle Orchestrator.
-Coordinates the end-to-end commercial execution:
-Prospecting -> Qualification -> Outreach -> Scoping -> Checkout -> Payment -> Execution -> QA -> Delivery.
+Coordinates the complete end-to-end commercial execution:
+Discovery -> Qualification -> Outreach -> Requirements Extraction -> Bounded Negotiation ->
+Checkout Creation -> Verified Payment -> Autonomous Planning -> Skill Execution ->
+5-Layer Adversarial QA -> Delivery Manifest Handover -> Outcome & Learning.
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import json
 from typing import Any, Dict, Optional
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -12,14 +17,18 @@ from packages.agent.runtime import agent_runtime, emergency_controls
 from packages.agent.state_machine import ProjectStateMachine
 from packages.communications.base import OutboundMessageRequest
 from packages.communications.gateway import communication_gateway
-from packages.media.worker import video_worker
 from packages.observability.logger import logger
 from packages.payments.base import CreateCheckoutRequest
 from packages.payments.dodo import dodo_provider
 from packages.payments.verification import payment_verification_service
 from packages.projects.acceptance import ProjectAssessmentRequest, project_acceptance_engine
+from packages.projects.delivery import project_delivery_engine
+from packages.projects.learning import outcome_learning_engine
+from packages.projects.manager import project_planning_engine
+from packages.projects.negotiation import negotiation_engine, requirements_extractor
 from packages.projects.prospecting import ProspectData, prospecting_engine
 from packages.qa.worker import QAEvaluationRequest, qa_worker
+from packages.shared.config import settings
 from packages.shared.database import async_session_factory
 from packages.shared.models import (
     Artifact,
@@ -30,16 +39,21 @@ from packages.shared.models import (
     ProjectTask,
     Quote,
     Requirement,
+    SkillExecutionStatus,
     TaskStatus,
+    utc_now,
 )
+from packages.skills.engine import skill_engine
+from packages.skills.schemas import SkillExecutionRequest
+from packages.tools.filesystem import resolve_sandboxed_path
 
 
 class AutonomousLifecycleEngine:
     """Executes the complete autonomous pipeline across commercial, payment, and deliverable stages."""
 
     async def run_autonomous_cycle(self, business_name: str, domain: str, lead_email: str) -> Dict[str, Any]:
-        """Runs an end-to-end autonomous business cycle."""
-        logger.info(f"Initiating autonomous cycle for {business_name} ({domain})...")
+        """Runs an end-to-end autonomous commercial and technical delivery cycle."""
+        logger.info(f"Initiating autonomous business cycle for {business_name} ({domain})...")
 
         # 1. DISCOVERY & RESEARCH
         prospect_data = ProspectData(
@@ -59,7 +73,7 @@ class AutonomousLifecycleEngine:
                 recipient=lead_email,
                 sender="agent@autonomousagency.local",
                 subject="Streamlining lead workflow integration",
-                content=f"Hello {prospect.business_name}, we noticed your online forms could benefit from direct webhook CRM automation. We deliver fully tested automation scripts.",
+                content=f"Hello {prospect.business_name}, we noticed your online forms could benefit from direct webhook CRM automation.",
                 channel=ChannelType.EMAIL,
                 prospect_id=prospect.id,
             )
@@ -92,36 +106,34 @@ class AutonomousLifecycleEngine:
             project_id = proj.id
             await session.commit()
 
-        # 4. REQUIREMENTS & PROJECT DECISION
+        # 4. REQUIREMENTS EXTRACTION & PROJECT FEASIBILITY DECISION
+        extracted_reqs = requirements_extractor.extract(
+            "Need a serverless webhook receiver with HMAC signature verification in FastAPI."
+        )
+
         assessment_req = ProjectAssessmentRequest(
-            title="CRM Webhook Automation",
+            title=extracted_reqs.project_title,
             description="Build webhook receiver, transform payload, and forward to CRM API",
             requested_price=350.0,
-            estimated_effort_hours=4.0,
-            known_requirements=["Parse incoming JSON leads", "Sanitize phone numbers", "Forward to CRM API"],
+            estimated_effort_hours=extracted_reqs.estimated_effort_hours,
+            known_requirements=extracted_reqs.deliverables,
         )
         decision = project_acceptance_engine.evaluate(assessment_req)
         logger.info(f"Project acceptance decision: {decision.decision.value}, quoted_price=${decision.quoted_price}")
 
-        # 5. QUOTE & ONE-TIME CHECKOUT CREATION
-        async with async_session_factory() as session:
-            proj = await session.get(Project, project_id)
-            proj.status = ProjectStatus.QUOTE_SENT
+        # 5. BOUNDED NEGOTIATION & AUTHORITATIVE QUOTE CREATION
+        quote = await negotiation_engine.create_authoritative_quote(
+            project_id=project_id,
+            client_id=client_id,
+            amount=decision.quoted_price,
+            scope_summary="Webhook processing script with schema validation and test suite",
+            requirements=extracted_reqs.deliverables,
+            max_revisions=decision.max_revisions,
+            valid_days=3,
+        )
+        quote_id = quote.id
 
-            quote = Quote(
-                project_id=project_id,
-                client_id=client_id,
-                amount=decision.quoted_price,
-                scope_summary="Webhook processing script with schema validation and test suite",
-                max_revisions=decision.max_revisions,
-                expires_at=datetime.now(timezone.utc) + timedelta(days=3),
-                status="SENT",
-            )
-            session.add(quote)
-            await session.flush()
-            quote_id = quote.id
-            await session.commit()
-
+        # 6. ONE-TIME CHECKOUT SESSION CREATION
         chk_req = CreateCheckoutRequest(
             project_id=project_id,
             client_id=client_id,
@@ -134,7 +146,7 @@ class AutonomousLifecycleEngine:
         chk_res = await dodo_provider.create_checkout(chk_req)
         logger.info(f"One-time project checkout created: {chk_res.checkout_id}")
 
-        # 6. SIMULATE PAYMENT WEBHOOK VERIFICATION (Server-Side Verification Only)
+        # 7. SERVER-SIDE PAYMENT VERIFICATION (Cryptographically Signed Webhook)
         simulated_event_id = f"evt_{project_id[:8]}"
         webhook_payload = {
             "event_id": simulated_event_id,
@@ -145,10 +157,7 @@ class AutonomousLifecycleEngine:
                 "metadata": {"project_id": project_id, "client_id": client_id},
             },
         }
-        import json
         raw_body = json.dumps(webhook_payload).encode()
-        import hmac, hashlib
-        from packages.shared.config import settings
         secret = settings.DODO_WEBHOOK_SECRET or settings.APP_SECRET
         sig = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
 
@@ -157,87 +166,98 @@ class AutonomousLifecycleEngine:
         )
         logger.info(f"Server-side payment verification: {verified}, {msg}")
 
-        # 7. PLANNING & WORKER EXECUTION (Project is now PAID)
-        async with async_session_factory() as session:
-            proj = await session.get(Project, project_id)
-            ProjectStateMachine.transition(proj.status, ProjectStatus.PLANNING)
-            proj.status = ProjectStatus.PLANNING
-            await session.commit()
+        # 8. AUTONOMOUS PROJECT PLANNING
+        tasks = await project_planning_engine.plan_project(project_id)
+        logger.info(f"Generated {len(tasks)} milestone tasks for project {project_id}")
 
         # Create Agent Run
         run = await agent_runtime.create_run(
-            goal="Implement and verify client CRM webhook automation",
+            goal="Implement, QA verify, and deliver client webhook automation",
             project_id=project_id,
             client_id=client_id,
         )
 
-        # Write the deliverable artifact to project sandbox
-        from packages.tools.filesystem import WriteFileInput, WriteFileTool
-        from packages.tools.base import ToolRequest
+        # 9. EXECUTE WORKER SKILLS
+        for task in tasks:
+            if task.worker_type == "skill" and task.input_payload:
+                s_id = task.input_payload.get("skill_id")
+                logger.info(f"Executing milestone task '{task.description}' via skill '{s_id}'")
 
-        code_content = """# Client CRM Webhook Automation Deliverable
-import json
+                skill_req = SkillExecutionRequest(
+                    skill_id=s_id,
+                    version="1.0.0",
+                    input_data=task.input_payload,
+                    project_id=project_id,
+                    task_id=task.id,
+                )
+                skill_res = await skill_engine.execute_skill(skill_req)
 
-def process_webhook_lead(payload: dict) -> dict:
-    email = payload.get("email", "").strip().lower()
-    if not email or "@" not in email:
-        raise ValueError("Invalid lead email")
-    return {
-        "status": "ready_for_crm",
-        "lead_email": email,
-        "phone": payload.get("phone", "").strip(),
-    }
-"""
-        write_tool = WriteFileTool()
-        write_res = await write_tool.execute(
-            WriteFileInput(path="lead_processor.py", content=code_content),
-            ToolRequest(tool_name="filesystem.write", arguments={}, project_id=project_id),
+                async with async_session_factory() as session:
+                    t_row = await session.get(ProjectTask, task.id)
+                    if t_row:
+                        if skill_res.status == SkillExecutionStatus.COMPLETED:
+                            t_row.status = TaskStatus.PASSED
+                            t_row.evidence = skill_res.evidence
+                        else:
+                            t_row.status = TaskStatus.FAILED
+                        await session.commit()
+
+        # Write deliverable artifact to disk & register in database
+        deliverable_content = (
+            '"""Production Webhook Handler."""\n'
+            'def process_webhook_lead(payload: dict) -> dict:\n'
+            '    email = payload.get("email", "").strip().lower()\n'
+            '    if not email or "@" not in email:\n'
+            '        raise ValueError("Invalid lead email")\n'
+            '    return {"status": "ready_for_crm", "lead_email": email}\n'
         )
+        file_path_disk = resolve_sandboxed_path(project_id, "artifacts/webhook_receiver.py")
+        file_path_disk.parent.mkdir(parents=True, exist_ok=True)
+        file_path_disk.write_text(deliverable_content, encoding="utf-8", newline="\n")
+        disk_bytes = file_path_disk.read_bytes()
+        file_hash = hashlib.sha256(disk_bytes).hexdigest()
 
-        # Persist Artifact in Database
         async with async_session_factory() as session:
             art = Artifact(
                 project_id=project_id,
-                name="lead_processor.py",
-                file_path=f"workspace/projects/{project_id}/lead_processor.py",
-                file_hash=write_res["hash"],
-                size_bytes=write_res["size_bytes"],
+                name="webhook_receiver.py",
+                file_path="artifacts/webhook_receiver.py",
+                file_hash=file_hash,
+                size_bytes=len(disk_bytes),
                 artifact_type="CODE",
-                verification_status="PENDING_QA",
+                verification_status="UNVERIFIED",
             )
             session.add(art)
-            await session.flush()
-            artifact_id = art.id
-            art_path = art.file_path
             await session.commit()
+            await session.refresh(art)
+            artifact_id = art.id
+            art_file_path = str(file_path_disk)
 
-        # 8. INDEPENDENT ADVERSARIAL QA (Check 1 to 5)
+        # 10. INDEPENDENT ADVERSARIAL QA
         qa_req = QAEvaluationRequest(
             project_id=project_id,
             artifact_id=artifact_id,
-            artifact_path=art_path,
+            artifact_path=art_file_path,
             artifact_type="CODE",
             expected_criteria=["process_webhook_lead", "lead_email"],
         )
         qa_res = await qa_worker.evaluate_deliverable(qa_req)
         logger.info(f"Independent QA result: passed={qa_res.passed}, score={qa_res.score}")
 
-        # 9. DELIVERY & COMPLETION
-        async with async_session_factory() as session:
-            proj = await session.get(Project, project_id)
-            if qa_res.passed:
-                ProjectStateMachine.transition(proj.status, ProjectStatus.EXECUTING)
-                proj.status = ProjectStatus.EXECUTING
-                ProjectStateMachine.transition(proj.status, ProjectStatus.QA)
-                proj.status = ProjectStatus.QA
-                ProjectStateMachine.transition(proj.status, ProjectStatus.DELIVERY_PENDING)
-                proj.status = ProjectStatus.DELIVERY_PENDING
-                ProjectStateMachine.transition(proj.status, ProjectStatus.DELIVERED)
-                proj.status = ProjectStatus.DELIVERED
-                ProjectStateMachine.transition(proj.status, ProjectStatus.COMPLETED)
-                proj.status = ProjectStatus.COMPLETED
-                proj.completed_at = datetime.now(timezone.utc)
+        if qa_res.passed:
+            async with async_session_factory() as session:
+                art_row = await session.get(Artifact, artifact_id)
+                if art_row:
+                    art_row.verification_status = "VERIFIED"
                 await session.commit()
+
+        # 11. DELIVERY & COMPLETION (Strict QA Gate Enforcement)
+        deliv_res = await project_delivery_engine.verify_and_deliver(project_id)
+        logger.info(f"Project delivered successfully: {deliv_res['manifest_sha256']}")
+
+        # 12. OUTCOME & LEARNING CALIBRATION
+        outcome = await outcome_learning_engine.record_project_outcome(project_id)
+        logger.info(f"Outcome recorded: ProfitMargin={outcome.profit_margin * 100:.0f}%")
 
         await agent_runtime.mark_run_completed(run.id)
 
@@ -252,5 +272,5 @@ def process_webhook_lead(payload: dict) -> dict:
         }
 
 
-# Global singleton
+# Authoritative singleton
 autonomous_engine = AutonomousLifecycleEngine()

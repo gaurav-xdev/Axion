@@ -78,13 +78,14 @@ class WriteFileTool(BaseTool):
         target_path = resolve_sandboxed_path(context.project_id, params.path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        target_path.write_text(params.content, encoding="utf-8")
-        file_hash = hashlib.sha256(params.content.encode("utf-8")).hexdigest()
+        target_path.write_text(params.content, encoding="utf-8", newline="\n")
+        actual_bytes = target_path.read_bytes()
+        file_hash = hashlib.sha256(actual_bytes).hexdigest()
         return {
             "path": params.path,
             "status": "written",
+            "size_bytes": len(actual_bytes),
             "hash": file_hash,
-            "size_bytes": len(params.content.encode("utf-8")),
         }
 
 

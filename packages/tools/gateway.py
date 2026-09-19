@@ -38,6 +38,7 @@ from packages.tools.unified import (
     ComputerActionTool,
     MediaProbeTool,
     PaymentCreateCheckoutTool,
+    QAEvaluateTool,
 )
 
 
@@ -57,12 +58,13 @@ class ToolGateway:
         self.register_tool(ListFilesTool())
         self.register_tool(TerminalExecTool())
 
-        # Unified Side-Effecting Tools
+        # Unified Side-Effecting & Verification Tools
         self.register_tool(CommunicationDispatchTool())
         self.register_tool(PaymentCreateCheckoutTool())
         self.register_tool(MediaProbeTool())
         self.register_tool(BrowserActionTool())
         self.register_tool(ComputerActionTool())
+        self.register_tool(QAEvaluateTool())
 
     async def execute(self, request: ToolRequest) -> ToolResult:
         start_time = time.monotonic()
@@ -211,6 +213,13 @@ class ToolGateway:
                 "execution_time_ms": exec_time,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            if isinstance(safe_output, dict):
+                if "hash" in safe_output:
+                    evidence["artifact_hash"] = safe_output["hash"]
+                elif "sha256_hash" in safe_output:
+                    evidence["artifact_hash"] = safe_output["sha256_hash"]
+                if "path" in safe_output:
+                    evidence["artifact_path"] = safe_output["path"]
 
             return ToolResult(
                 tool_name=tool.name,

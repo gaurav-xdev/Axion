@@ -208,3 +208,54 @@ class ComputerActionTool(BaseTool):
         )
         res = await self._worker.execute_action(action)
         return res.model_dump()
+
+
+# -----------------------------------------------------------------------------
+# QUALITY ASSURANCE EVALUATION TOOL
+# -----------------------------------------------------------------------------
+
+class QAEvaluateInput(BaseModel):
+    project_id: Optional[str] = Field(default=None, description="Project identifier")
+    artifact_id: str = Field(default="artifact_1", description="Artifact identifier")
+    artifact_path: str = Field(description="Path to artifact inside project workspace")
+    artifact_type: str = Field(default="CODE", description="Artifact type: CODE, N8N, MEDIA, REPORT")
+    expected_criteria: List[str] = Field(default_factory=list, description="Quality criteria")
+
+
+class QAEvaluateTool(BaseTool):
+    name = "qa.evaluate"
+    description = "Adversarial 5-layer quality assurance evaluation of project deliverables"
+    risk_level = ToolRiskLevel.READ_ONLY
+    input_schema = QAEvaluateInput
+    required_permission = "tools:execute"
+
+    def __init__(self):
+        self._worker = None
+
+    async def execute(self, params: QAEvaluateInput, context: ToolRequest) -> Dict[str, Any]:
+        if self._worker is None:
+            from packages.qa.worker import QAWorker
+            self._worker = QAWorker()
+        from packages.qa.worker import QAEvaluationRequest
+        req = QAEvaluationRequest(
+            project_id=params.project_id or context.project_id or "default_project",
+            artifact_id=params.artifact_id,
+            artifact_path=params.artifact_path,
+            artifact_type=params.artifact_type,
+            expected_criteria=params.expected_criteria,
+        )
+        res = await self._worker.evaluate_deliverable(req)
+        return {
+            "passed": res.passed,
+            "score": res.score,
+            "checks": {
+                "input_valid": res.check1_input_valid,
+                "security_valid": res.check2_security_policy_valid,
+                "execution_valid": res.check3_execution_valid,
+                "functional_qa_valid": res.check4_functional_qa_valid,
+                "final_state_evidence_valid": res.check5_final_state_evidence_valid,
+            },
+            "findings": res.findings,
+            "sha256_hash": res.sha256_hash,
+        }
+

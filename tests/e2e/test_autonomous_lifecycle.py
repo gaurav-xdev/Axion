@@ -63,15 +63,14 @@ async def test_full_autonomous_business_cycle(monkeypatch):
         assert payment.status.value == "PAID"
         assert payment.amount == 350.0
 
-        # Physical Artifact must exist with valid SHA256 hash
+        # Physical Artifacts must exist with valid SHA256 hash
         art_stmt = select(Artifact).where(Artifact.project_id == project_id)
-        artifact = (await session.execute(art_stmt)).scalar_one_or_none()
-        assert artifact is not None
-        assert len(artifact.file_hash) == 64  # Valid SHA-256
+        artifacts = (await session.execute(art_stmt)).scalars().all()
+        assert len(artifacts) >= 1
+        assert any(art.name == "webhook_receiver.py" and len(art.file_hash) == 64 for art in artifacts)
 
         # Independent QA Run must be PASSED
         qa_stmt = select(QARun).where(QARun.project_id == project_id)
-        qa = (await session.execute(qa_stmt)).scalar_one_or_none()
-        assert qa is not None
-        assert qa.status == "PASSED"
-        assert qa.score == 1.0
+        qa_runs = (await session.execute(qa_stmt)).scalars().all()
+        assert len(qa_runs) >= 1
+        assert any(qa.status == "PASSED" and qa.score == 1.0 for qa in qa_runs)

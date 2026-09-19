@@ -1,6 +1,7 @@
-﻿"""Seed Starter Skills Catalog.
+"""Seed Starter Skills Catalog.
 Contains 12 canonical, structured, typed skills.
 Each skill defines machine-readable schemas, strict allowed tools, and explicit verification criteria.
+All procedures execute concrete tool calls and deterministic validation.
 """
 
 from typing import List
@@ -32,6 +33,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                 "properties": {
                     "domain": {"type": "string"},
                     "business_name": {"type": "string"},
+                    "pain_points": {"type": "array", "items": {"type": "string"}},
                 },
             },
             output_schema={
@@ -42,7 +44,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "pain_points": {"type": "array", "items": {"type": "string"}},
                 },
             },
-            allowed_tool_names=["filesystem.read", "filesystem.write"],
+            allowed_tool_names=["filesystem.write"],
             procedure=[
                 ProcedureStep(
                     step_id="observe_domain",
@@ -59,19 +61,27 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Formatted research output",
                 ),
+                ProcedureStep(
+                    step_id="persist_research_dossier",
+                    description="Persist findings to sandboxed project workspace",
+                    objective="Write dossier to filesystem",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Dossier file written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
                 checks=[
                     VerificationCheck(
                         check_name="evidence_check",
                         check_type="SCHEMA",
-                        description="Ensure domain is verified",
+                        description="Ensure domain is verified and dossier written",
                     )
                 ],
-                required_evidence_keys=["observed_at"],
+                required_evidence_keys=["observed_at", "tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["observed_at"],
+            evidence_requirements=["observed_at", "tool_name"],
         ),
 
         # 2. Analyze Opportunity
@@ -98,7 +108,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "opportunity_score": {"type": "number"},
                 },
             },
-            allowed_tool_names=["filesystem.read"],
+            allowed_tool_names=["filesystem.write"],
             procedure=[
                 ProcedureStep(
                     step_id="evaluate_feasibility",
@@ -106,13 +116,21 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Calculate score and feasibility",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Opportunity score and feasibility flag",
-                )
+                ),
+                ProcedureStep(
+                    step_id="persist_opportunity_score",
+                    description="Write opportunity analysis to workspace",
+                    objective="Persist scored evaluation",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Evaluation report written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 3. Generate Project Estimate
@@ -139,7 +157,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "quoted_price": {"type": "number"},
                 },
             },
-            allowed_tool_names=[],
+            allowed_tool_names=["filesystem.write"],
             procedure=[
                 ProcedureStep(
                     step_id="compute_pricing",
@@ -147,13 +165,21 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Determine project quote",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Pricing breakdown",
-                )
+                ),
+                ProcedureStep(
+                    step_id="persist_estimate",
+                    description="Write formal project estimate to workspace",
+                    objective="Persist cost and effort ledger",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Estimate file written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 4. Generate Client Proposal
@@ -189,13 +215,21 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Generate proposal document",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Proposal document text",
-                )
+                ),
+                ProcedureStep(
+                    step_id="save_proposal_file",
+                    description="Persist formal proposal markdown in workspace",
+                    objective="Write proposal to file",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Proposal file written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 5. Build n8n Automation
@@ -230,13 +264,29 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Produce valid JSON workflow",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Workflow JSON structure",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_workflow_file",
+                    description="Write workflow specification to project workspace",
+                    objective="Persist JSON workflow",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Workflow JSON file written",
+                ),
+                ProcedureStep(
+                    step_id="verify_workflow_file",
+                    description="Read back workflow file to verify integrity",
+                    objective="Verify written file readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="Workflow file verified",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.MEDIUM,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
             solution_patterns=[SolutionPatternRef(solution_id="pattern_n8n_crm_sync", version="1.0.0")],
         ),
 
@@ -264,7 +314,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "language": {"type": "string"},
                 },
             },
-            allowed_tool_names=["filesystem.write"],
+            allowed_tool_names=["filesystem.write", "filesystem.read"],
             procedure=[
                 ProcedureStep(
                     step_id="generate_handler",
@@ -272,13 +322,29 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Produce Python FastAPI webhook route",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Webhook route source code",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_webhook_file",
+                    description="Write webhook receiver Python module",
+                    objective="Persist Python source code",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Source file written",
+                ),
+                ProcedureStep(
+                    step_id="verify_webhook_file",
+                    description="Read back module to verify byte integrity",
+                    objective="Verify module readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="Module verified",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.MEDIUM,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 7. Build API Integration
@@ -304,7 +370,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "client_code": {"type": "string"},
                 },
             },
-            allowed_tool_names=["filesystem.write"],
+            allowed_tool_names=["filesystem.write", "filesystem.read"],
             procedure=[
                 ProcedureStep(
                     step_id="build_client",
@@ -312,13 +378,29 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Generate client class",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="API client code",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_client_file",
+                    description="Write API client module to workspace",
+                    objective="Persist client source code",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Client file written",
+                ),
+                ProcedureStep(
+                    step_id="verify_client_file",
+                    description="Read back client file to verify syntax and bytes",
+                    objective="Verify client readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="Client file verified",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 8. Build Landing Page
@@ -344,7 +426,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "html_content": {"type": "string"},
                 },
             },
-            allowed_tool_names=["filesystem.write"],
+            allowed_tool_names=["filesystem.write", "filesystem.read"],
             procedure=[
                 ProcedureStep(
                     step_id="render_template",
@@ -352,13 +434,29 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Generate complete HTML markup",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Complete HTML string",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_landing_page",
+                    description="Write index.html to project workspace",
+                    objective="Persist HTML landing page",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="HTML file written",
+                ),
+                ProcedureStep(
+                    step_id="verify_landing_page",
+                    description="Read back HTML file to verify markup integrity",
+                    objective="Verify HTML readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="HTML verified",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 9. Build Business Dashboard
@@ -384,7 +482,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "dashboard_spec": {"type": "object"},
                 },
             },
-            allowed_tool_names=["filesystem.write"],
+            allowed_tool_names=["filesystem.write", "filesystem.read"],
             procedure=[
                 ProcedureStep(
                     step_id="compose_dashboard",
@@ -392,13 +490,29 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Produce dashboard schema",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Dashboard spec JSON",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_dashboard_spec",
+                    description="Write dashboard specification to workspace",
+                    objective="Persist dashboard JSON spec",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Dashboard spec written",
+                ),
+                ProcedureStep(
+                    step_id="verify_dashboard_spec",
+                    description="Read back dashboard spec to verify JSON integrity",
+                    objective="Verify spec readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="Dashboard spec verified",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 10. QA Project Deliverable
@@ -415,6 +529,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                 "properties": {
                     "artifact_path": {"type": "string"},
                     "artifact_type": {"type": "string"},
+                    "project_id": {"type": "string"},
                 },
             },
             output_schema={
@@ -425,21 +540,30 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "score": {"type": "number"},
                 },
             },
-            allowed_tool_names=["filesystem.read"],
+            allowed_tool_names=["filesystem.read", "qa.evaluate"],
             procedure=[
                 ProcedureStep(
+                    step_id="read_artifact",
+                    description="Read target artifact to verify accessibility",
+                    objective="Confirm artifact exists and is readable",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.read"],
+                    expected_output="Artifact bytes verified",
+                ),
+                ProcedureStep(
                     step_id="evaluate_artifact",
-                    description="Inspect and evaluate artifact quality",
-                    objective="Run verification layers",
-                    action_type=SkillActionType.TRANSFORM,
+                    description="Run independent 5-layer adversarial QA",
+                    objective="Execute QA evaluation pipeline",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["qa.evaluate"],
                     expected_output="QA evaluation result",
-                )
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 11. Prepare Project Delivery
@@ -466,21 +590,37 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "package_status": {"type": "string"},
                 },
             },
-            allowed_tool_names=["filesystem.list", "filesystem.read"],
+            allowed_tool_names=["filesystem.list", "filesystem.write"],
             procedure=[
+                ProcedureStep(
+                    step_id="list_deliverable_artifacts",
+                    description="List project workspace directory",
+                    objective="Inspect existing artifact directory",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.list"],
+                    expected_output="Artifact directory listing",
+                ),
                 ProcedureStep(
                     step_id="bundle_artifacts",
                     description="Compile manifest of deliverable artifacts",
                     objective="Generate delivery package manifest",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Package manifest",
-                )
+                ),
+                ProcedureStep(
+                    step_id="write_delivery_bundle",
+                    description="Write delivery manifest to workspace",
+                    objective="Persist delivery bundle manifest",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Delivery manifest written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
 
         # 12. Record Project Outcome
@@ -508,7 +648,7 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     "timestamp": {"type": "string"},
                 },
             },
-            allowed_tool_names=[],
+            allowed_tool_names=["filesystem.write"],
             procedure=[
                 ProcedureStep(
                     step_id="finalize_metrics",
@@ -516,12 +656,20 @@ def get_starter_skills() -> List[SkillDefinitionPayload]:
                     objective="Record final summary",
                     action_type=SkillActionType.TRANSFORM,
                     expected_output="Confirmation summary",
-                )
+                ),
+                ProcedureStep(
+                    step_id="persist_outcome_ledger",
+                    description="Write final financial ledger to workspace",
+                    objective="Persist outcome record",
+                    action_type=SkillActionType.TOOL_CALL,
+                    allowed_tools=["filesystem.write"],
+                    expected_output="Financial ledger written",
+                ),
             ],
             verification_procedure=VerificationProcedure(
-                required_evidence_keys=["transformed_keys"],
+                required_evidence_keys=["tool_name"],
             ),
             risk_class=ToolRiskLevel.LOW,
-            evidence_requirements=["transformed_keys"],
+            evidence_requirements=["tool_name"],
         ),
     ]

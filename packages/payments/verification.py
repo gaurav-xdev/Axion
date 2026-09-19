@@ -18,6 +18,7 @@ from packages.shared.models import (
     PaymentStatus,
     Project,
     ProjectStatus,
+    Quote,
     ToolRiskLevel,
 )
 
@@ -104,9 +105,38 @@ class PaymentVerificationService:
 
             # 5. Process Settlement / Success
             if "succeeded" in event_type.lower() or "paid" in event_type.lower():
+                # Ensure Checkout row exists for foreign key constraint
+                from datetime import timedelta
+                chk_row = None
+                if checkout_id:
+                    chk_stmt = select(Checkout).where(
+                        (Checkout.dodo_checkout_id == checkout_id) | (Checkout.id == checkout_id)
+                    )
+                    chk_row = (await session.execute(chk_stmt)).scalar_one_or_none()
+
+                actual_checkout_id = chk_row.id if chk_row else (checkout_id or f"chk_{event_id}")
+                if not chk_row:
+                    q_stmt = select(Quote).where(Quote.project_id == proj.id)
+                    q_row = (await session.execute(q_stmt)).scalars().first()
+                    quote_ref_id = q_row.id if q_row else f"quote_{event_id[:8]}"
+
+                    chk_row = Checkout(
+                        id=actual_checkout_id,
+                        project_id=proj.id,
+                        client_id=proj.client_id,
+                        quote_id=quote_ref_id,
+                        dodo_checkout_id=checkout_id or f"chk_{event_id}",
+                        checkout_url=f"https://checkout.dodopayments.com/{checkout_id}",
+                        amount=amount or proj.accepted_price,
+                        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+                    )
+                    session.add(chk_row)
+                    await session.flush()
+                    actual_checkout_id = chk_row.id
+
                 # Record Payment
                 payment_record = Payment(
-                    checkout_id=checkout_id or f"chk_{event_id}",
+                    checkout_id=actual_checkout_id,
                     project_id=proj.id,
                     client_id=proj.client_id,
                     dodo_payment_id=data_payload.get("payment_id", event_id),
