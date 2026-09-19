@@ -106,6 +106,58 @@ class ProspectingEngine:
             logger.info(f"Created prospect '{new_prospect.business_name}' with score {score}")
             return new_prospect
 
+    async def discover_and_qualify_target(
+        self, domain: str, business_name: Optional[str] = None
+    ) -> Prospect:
+        """Actively inspects an online domain using BrowserWorker to extract real signals and qualify it."""
+        from packages.browser.worker import BrowserTaskInput, browser_worker
+
+        norm_domain = normalize_domain(domain)
+        target_url = f"https://{norm_domain}"
+
+        # 1. Fetch domain metadata and page content via BrowserWorker
+        browser_task = BrowserTaskInput(
+            url=target_url,
+            extract_selectors=["title", "h1", "footer", "a[href*='contact']"],
+            capture_screenshot=False,
+        )
+        browser_res = await browser_worker.execute_task(browser_task)
+
+        observed_pain_points: List[str] = []
+        evidence_urls: List[str] = [target_url]
+        contact_email: Optional[str] = None
+
+        if browser_res.success:
+            resolved_name = business_name or browser_res.title.strip() or norm_domain
+            text_corpus = " ".join(browser_res.extracted_text.values()).lower()
+
+            # Analyze signals
+            if "contact" in text_corpus or "quote" in text_corpus:
+                observed_pain_points.append("Manual quotation/inquiry intake process")
+            if "schedule" in text_corpus or "calendar" in text_corpus:
+                observed_pain_points.append("Unautomated booking or appointment workflow")
+            if not observed_pain_points:
+                observed_pain_points.append("Opportunities for automated lead webhook processing")
+
+            # Extract email if present in text
+            import re
+            emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text_corpus)
+            if emails:
+                contact_email = emails[0]
+        else:
+            resolved_name = business_name or norm_domain
+            observed_pain_points.append("Domain presence detected; automated CRM integration potential")
+
+        prospect_data = ProspectData(
+            business_name=resolved_name,
+            website=target_url,
+            contact_name=f"Lead at {resolved_name}",
+            contact_email=contact_email,
+            observed_pain_points=observed_pain_points,
+            evidence_urls=evidence_urls,
+        )
+        return await self.ingest_prospect(prospect_data)
+
 
 # Global singleton
 prospecting_engine = ProspectingEngine()

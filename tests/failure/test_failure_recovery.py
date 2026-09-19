@@ -51,7 +51,20 @@ async def test_router_fallback_when_nim_fails(monkeypatch):
     async def failing_nim_generate(*args, **kwargs):
         raise ConnectionError("NVIDIA NIM cluster unreachable (503 Service Unavailable)")
 
+    async def mock_ollama_generate(*args, **kwargs):
+        from packages.llm.providers import LLMResponse
+        return LLMResponse(
+            content="Fallback architecture plan",
+            provider="ollama",
+            model="qwen2.5:72b",
+            input_tokens=100,
+            output_tokens=50,
+            estimated_cost=0.0001,
+            latency_ms=100,
+        )
+
     monkeypatch.setattr(llm_router.nim, "generate", failing_nim_generate)
+    monkeypatch.setattr(llm_router.ollama, "generate", mock_ollama_generate)
 
     # Execution must not crash; router must safely fallback to Ollama
     response = await llm_router.generate(

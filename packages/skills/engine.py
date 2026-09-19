@@ -497,5 +497,8 @@ class SkillExecutionEngine:
                 session.add(m)
             await session.commit()
 
+    # Alias for convenience
+    start_execution = execute_skill
+
 
 skill_engine = SkillExecutionEngine()

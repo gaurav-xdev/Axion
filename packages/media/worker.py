@@ -86,21 +86,10 @@ class VideoWorker:
                     audio_codec=a_stream.get("codec_name"),
                 )
 
-        # Fallback inspection for simulated or basic file validation
-        file_size = p.stat().st_size
-        logger.info(f"ffprobe CLI not found. Performing structural filesystem inspection of {p.name}")
-        return MediaMetadata(
-            format_name=p.suffix.lstrip(".").lower() or "mp4",
-            duration_seconds=30.0,
-            size_bytes=file_size,
-            bit_rate=1500000,
-            has_video=True,
-            has_audio=True,
-            video_codec="h264",
-            width=1920,
-            height=1080,
-            fps=30.0,
-            audio_codec="aac",
+        # Fail closed: ffprobe is strictly required for media probing
+        logger.error(f"ffprobe CLI not found on system PATH. Cannot probe media '{p.name}'.")
+        raise FileNotFoundError(
+            f"ffprobe executable not found on system PATH; cannot inspect media file: {file_path}"
         )
 
     async def verify_render_output(self, output_path: str) -> VideoRenderResult:

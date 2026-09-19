@@ -6,13 +6,6 @@ as first-class BaseTool implementations.
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from packages.browser.worker import BrowserTaskInput, BrowserWorker
-from packages.communications.base import OutboundMessageRequest
-from packages.communications.gateway import CommunicationGateway
-from packages.computer.worker import ComputerAction, ComputerWorker
-from packages.media.worker import VideoWorker
-from packages.payments.base import CreateCheckoutRequest
-from packages.payments.dodo import DodoPaymentsProvider
 from packages.shared.models import ChannelType, ToolRiskLevel
 from packages.tools.base import BaseTool, ToolRequest
 
@@ -39,9 +32,13 @@ class CommunicationDispatchTool(BaseTool):
     required_permission = "conversations:write"
 
     def __init__(self):
-        self._gw = CommunicationGateway()
+        self._gw = None
 
     async def execute(self, params: CommunicationDispatchInput, context: ToolRequest) -> Dict[str, Any]:
+        if self._gw is None:
+            from packages.communications.gateway import CommunicationGateway
+            self._gw = CommunicationGateway()
+        from packages.communications.base import OutboundMessageRequest
         ch_enum = ChannelType[params.channel.upper()] if params.channel.upper() in ChannelType.__members__ else ChannelType.EMAIL
         req = OutboundMessageRequest(
             recipient=params.recipient,
@@ -83,12 +80,17 @@ class PaymentCreateCheckoutTool(BaseTool):
     required_permission = "payments:write"
 
     def __init__(self):
-        self._provider = DodoPaymentsProvider()
+        self._provider = None
 
     async def execute(self, params: PaymentCreateCheckoutInput, context: ToolRequest) -> Dict[str, Any]:
         if not context.project_id:
             raise ValueError("Payment checkout generation requires an authoritative project_id context")
 
+        if self._provider is None:
+            from packages.payments.dodo import DodoPaymentsProvider
+            self._provider = DodoPaymentsProvider()
+
+        from packages.payments.base import CreateCheckoutRequest
         req = CreateCheckoutRequest(
             project_id=context.project_id,
             client_id=context.client_id or "default_client",
@@ -126,9 +128,12 @@ class MediaProbeTool(BaseTool):
     required_permission = "tools:read"
 
     def __init__(self):
-        self._worker = VideoWorker()
+        self._worker = None
 
     async def execute(self, params: MediaProbeInput, context: ToolRequest) -> Dict[str, Any]:
+        if self._worker is None:
+            from packages.media.worker import VideoWorker
+            self._worker = VideoWorker()
         meta = await self._worker.probe_media(params.file_path)
         return meta.model_dump()
 
@@ -151,9 +156,13 @@ class BrowserActionTool(BaseTool):
     required_permission = "tools:execute"
 
     def __init__(self):
-        self._worker = BrowserWorker()
+        self._worker = None
 
     async def execute(self, params: BrowserActionInput, context: ToolRequest) -> Dict[str, Any]:
+        if self._worker is None:
+            from packages.browser.worker import BrowserWorker
+            self._worker = BrowserWorker()
+        from packages.browser.worker import BrowserTaskInput
         task = BrowserTaskInput(
             url=params.url,
             extract_selectors=params.extract_selectors,
@@ -184,9 +193,13 @@ class ComputerActionTool(BaseTool):
     required_permission = "tools:execute"
 
     def __init__(self):
-        self._worker = ComputerWorker()
+        self._worker = None
 
     async def execute(self, params: ComputerActionInput, context: ToolRequest) -> Dict[str, Any]:
+        if self._worker is None:
+            from packages.computer.worker import ComputerWorker
+            self._worker = ComputerWorker()
+        from packages.computer.worker import ComputerAction
         action = ComputerAction(
             action_type=params.action_type,
             x=params.x,

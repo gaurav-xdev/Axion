@@ -46,7 +46,52 @@ async def process_single_task(msg_id: str, task: DispatchTaskMessage) -> None:
             await asyncio.sleep(2.0)
             return
 
-        # 2. Invoke Authoritative Tool Gateway with timeout
+        # 2. Route by worker_type: "skill" vs "tool"
+        if task.worker_type == "skill":
+            from packages.skills.engine import skill_engine
+            from packages.skills.schemas import SkillExecutionRequest
+            from packages.shared.models import SkillExecutionStatus
+
+            skill_req = SkillExecutionRequest(
+                skill_id=task.action_name,
+                version=task.payload.get("version"),
+                input_data=task.payload.get("input_data", task.payload),
+                project_id=task.project_id,
+                task_id=task.task_id,
+                idempotency_key=task.idempotency_key,
+                timeout_seconds=task.timeout_seconds,
+            )
+
+            try:
+                skill_res = await asyncio.wait_for(
+                    skill_engine.start_execution(skill_req),
+                    timeout=float(task.timeout_seconds + 5),
+                )
+
+                if skill_res.status == SkillExecutionStatus.COMPLETED:
+                    logger.info(
+                        f"Skill task {task.task_id} ({task.action_name}) completed successfully by {consumer_id}"
+                    )
+                    await task_dispatcher.acknowledge_task(msg_id, task.task_id, success=True)
+                elif skill_res.status == SkillExecutionStatus.WAITING:
+                    logger.info(f"Skill task {task.task_id} checkpointed and WAITING (PAUSED).")
+                    await asyncio.sleep(2.0)
+                else:
+                    logger.warning(f"Skill task {task.task_id} failed: {skill_res.error}")
+                    await task_dispatcher.handle_retry_or_dlq(
+                        msg_id, task, skill_res.error or "Skill execution failed"
+                    )
+            except asyncio.TimeoutError:
+                err = f"Skill execution exceeded timeout limit of {task.timeout_seconds}s"
+                logger.error(f"Skill task {task.task_id} TIMED OUT on {consumer_id}")
+                await task_dispatcher.handle_retry_or_dlq(msg_id, task, err)
+            except Exception as ex:
+                err = f"Unexpected skill worker error: {str(ex)}"
+                logger.error(f"Skill task {task.task_id} failed unexpectedly: {ex}")
+                await task_dispatcher.handle_retry_or_dlq(msg_id, task, err)
+            return
+
+        # 3. Invoke Authoritative Tool Gateway with timeout
         tool_req = ToolRequest(
             tool_name=task.action_name,
             arguments=task.payload,

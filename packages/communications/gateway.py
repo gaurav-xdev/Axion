@@ -35,22 +35,48 @@ class EmailProvider(CommunicationProvider):
                 error="SMTP Email provider credentials are not configured",
             )
 
-        # In production with live SMTP: send through aiosmtplib/smtplib
-        # Here we perform connection check or transmission
+        # Live SMTP delivery using smtplib via asyncio threadpool
+        import asyncio
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        def _sync_send() -> None:
+            msg = MIMEMultipart()
+            msg["From"] = settings.SMTP_FROM_EMAIL or settings.SMTP_USER
+            msg["To"] = request.recipient
+            msg["Subject"] = request.subject or "Notification from Axion"
+            msg.attach(MIMEText(request.content, "plain", "utf-8"))
+
+            if settings.SMTP_PORT == 465:
+                server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15.0)
+            else:
+                server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15.0)
+                server.starttls()
+
+            if settings.SMTP_USER and settings.SMTP_PASSWORD:
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+
+            server.send_message(msg)
+            server.quit()
+
         try:
-            # Simulated transmission for valid configuration test
+            await asyncio.to_thread(_sync_send)
+            msg_id = f"email_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+            logger.info(f"Email successfully delivered to {request.recipient} (msg_id: {msg_id})")
             return DispatchResult(
                 success=True,
                 channel=ChannelType.EMAIL,
                 status="SENT",
-                message_id=f"email_{datetime.now(timezone.utc).timestamp()}",
+                message_id=msg_id,
             )
         except Exception as e:
+            logger.error(f"SMTP delivery failed to {request.recipient}: {e}")
             return DispatchResult(
                 success=False,
                 channel=ChannelType.EMAIL,
                 status="FAILED",
-                error=str(e),
+                error=f"SMTP transmission error: {str(e)}",
             )
 
 

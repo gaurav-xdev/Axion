@@ -51,9 +51,26 @@ async def test_unified_communication_tool_via_gateway():
 
 
 @pytest.mark.asyncio
-async def test_unified_payment_tool_requires_project_context_and_permission():
+async def test_unified_payment_tool_requires_project_context_and_permission(monkeypatch):
     """Verify payment checkout tool requires valid project context and permissions."""
     await init_db()
+
+    from datetime import datetime, timedelta, timezone
+    from packages.payments.base import CheckoutResponse
+    from packages.payments.dodo import DodoPaymentsProvider
+    from packages.shared.models import PaymentStatus
+
+    async def mock_create_checkout(self, req):
+        return CheckoutResponse(
+            checkout_id="chk_unit_test_123",
+            checkout_url="https://test.dodopayments.com/checkout/chk_unit_test_123",
+            amount=req.amount,
+            currency=req.currency,
+            status=PaymentStatus.CHECKOUT_CREATED,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+
+    monkeypatch.setattr(DodoPaymentsProvider, "create_checkout", mock_create_checkout)
 
     # 1. Auditor role lacks payments:write permission -> must be DENIED
     denied_req = ToolRequest(

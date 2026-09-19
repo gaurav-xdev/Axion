@@ -15,8 +15,24 @@ async def setup_db():
 
 
 @pytest.mark.asyncio
-async def test_full_autonomous_business_cycle():
+async def test_full_autonomous_business_cycle(monkeypatch):
     import uuid
+    from datetime import datetime, timedelta, timezone
+    from packages.payments.base import CheckoutResponse
+    from packages.payments.dodo import dodo_provider
+    from packages.shared.models import PaymentStatus
+
+    async def mock_create_checkout(req):
+        return CheckoutResponse(
+            checkout_id=f"chk_e2e_{req.project_id[:8]}",
+            checkout_url=f"https://test.dodopayments.com/checkout/chk_e2e_{req.project_id[:8]}",
+            amount=req.amount,
+            currency=req.currency,
+            status=PaymentStatus.CHECKOUT_CREATED,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+
+    monkeypatch.setattr(dodo_provider, "create_checkout", mock_create_checkout)
     uid = str(uuid.uuid4())[:8]
 
     # Execute full autonomous lifecycle

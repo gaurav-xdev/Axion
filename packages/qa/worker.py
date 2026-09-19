@@ -98,7 +98,7 @@ class QAWorker:
         if c3_valid:
             try:
                 text_content = p.read_text(encoding="utf-8", errors="replace")
-                # Check for unfinished placeholders
+                # 4a. Check for unfinished placeholders
                 placeholder_markers = ["TODO", "FIXME", "REPLACE_ME", "throw new Error('Not implemented')"]
                 for marker in placeholder_markers:
                     if marker in text_content:
@@ -110,7 +110,53 @@ class QAWorker:
                             "remediation": f"Remove {marker} and implement actual functional code/workflow",
                         })
 
-                # Validate expected criteria
+                # 4b. Concrete Syntax & Parse Verification
+                if p.suffix == ".py" or req.artifact_type == "CODE":
+                    import ast
+                    import py_compile
+                    try:
+                        ast.parse(text_content, filename=str(p))
+                        py_compile.compile(str(p), doraise=True)
+                    except SyntaxError as syn_err:
+                        c4_valid = False
+                        findings.append({
+                            "severity": "CRITICAL",
+                            "category": "syntax_error",
+                            "description": f"Python syntax error at line {syn_err.lineno}: {syn_err.msg}",
+                            "remediation": "Correct Python syntax error before submitting to QA",
+                        })
+                    except Exception as comp_err:
+                        c4_valid = False
+                        findings.append({
+                            "severity": "HIGH",
+                            "category": "compilation_failure",
+                            "description": f"Compilation failed: {comp_err}",
+                            "remediation": "Ensure code compiles cleanly without runtime parse errors",
+                        })
+
+                elif p.suffix == ".json" or req.artifact_type == "N8N":
+                    import json
+                    try:
+                        parsed_json = json.loads(text_content)
+                        if req.artifact_type == "N8N":
+                            if not isinstance(parsed_json, dict) or "nodes" not in parsed_json:
+                                c4_valid = False
+                                findings.append({
+                                    "severity": "HIGH",
+                                    "category": "invalid_n8n_schema",
+                                    "description": "JSON deliverable is missing top-level 'nodes' definition for n8n workflow",
+                                    "remediation": "Structure JSON deliverable with valid n8n nodes and connections",
+                                })
+                    except json.JSONDecodeError as jde:
+                        c4_valid = False
+                        findings.append({
+                            "severity": "CRITICAL",
+                            "category": "json_parse_error",
+                            "description": f"Invalid JSON syntax at line {jde.lineno}: {jde.msg}",
+                            "remediation": "Fix invalid JSON formatting",
+                        })
+
+                # 4c. Validate expected criteria
                 for crit in req.expected_criteria:
                     if crit.lower() not in text_content.lower():
                         c4_valid = False
@@ -120,8 +166,14 @@ class QAWorker:
                             "description": f"Acceptance criterion '{crit}' is not reflected in artifact",
                             "remediation": f"Implement required criterion: {crit}",
                         })
-            except Exception:
-                pass
+            except Exception as ex:
+                logger.error(f"Error during functional QA check: {ex}")
+                findings.append({
+                    "severity": "MEDIUM",
+                    "category": "qa_inspection_error",
+                    "description": f"Could not complete functional inspection: {str(ex)}",
+                    "remediation": "Verify file integrity and accessibility",
+                })
 
         # CHECK 5: Final State & Evidence
         c5_valid = c1_valid and c2_valid and c3_valid and (sha256 is not None)

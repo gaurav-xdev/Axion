@@ -22,6 +22,11 @@ class CircuitBreakerState(str, Enum):
     HALF_OPEN = "HALF_OPEN"
 
 
+class ProviderNotConfiguredError(RuntimeError):
+    """Raised when an LLM provider is invoked without mandatory credentials or configuration."""
+    pass
+
+
 class LLMResponse(BaseModel):
     content: str
     provider: str
@@ -117,18 +122,10 @@ class OllamaProvider(LLMProvider):
             "stream": False,
         }
 
-        # Check if running without external credentials (sandbox/test mode)
-        if not self.api_key or "placeholder" in self.api_key or "test" in self.base_url:
-            logger.info("OllamaProvider executing with simulated response (no external API key)")
-            OLLAMA_REQUESTS_TOTAL.labels(model=self.model, status="simulated").inc()
-            return LLMResponse(
-                content="[Ollama Response] Analyzed request successfully with standard reasoning.",
-                provider="ollama",
-                model=self.model,
-                input_tokens=150,
-                output_tokens=60,
-                estimated_cost=0.0002,
-                latency_ms=120,
+        # Fail closed if credentials or endpoint are missing
+        if not self.api_key or "placeholder" in self.api_key:
+            raise ProviderNotConfiguredError(
+                "OllamaProvider is not configured (missing or placeholder OLLAMA_API_KEY). Synthetic fallback is prohibited."
             )
 
         import time
@@ -217,18 +214,10 @@ class NIMProvider(LLMProvider):
             "max_tokens": max_tokens,
         }
 
-        # Check if running without external credentials (sandbox/test mode)
-        if not self.api_key or "placeholder" in self.api_key or "test" in self.base_url:
-            logger.info("NIMProvider executing with simulated response (no external API key)")
-            NIM_REQUESTS_TOTAL.labels(model=self.model, status="simulated").inc()
-            return LLMResponse(
-                content="[NVIDIA NIM Response] Complex architectural analysis completed with deep reasoning.",
-                provider="nvidia_nim",
-                model=self.model,
-                input_tokens=300,
-                output_tokens=150,
-                estimated_cost=0.002,
-                latency_ms=350,
+        # Fail closed if credentials or endpoint are missing
+        if not self.api_key or "placeholder" in self.api_key:
+            raise ProviderNotConfiguredError(
+                "NIMProvider is not configured (missing or placeholder NIM_API_KEY). Synthetic fallback is prohibited."
             )
 
         import time
