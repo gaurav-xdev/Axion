@@ -48,6 +48,13 @@ class InboundMessagePayload(BaseModel):
     received_at: datetime = Field(default_factory=utc_now)
 
 
+class InboundClassificationResult(BaseModel):
+    classification: InboundClassification
+    confidence: float = 1.0
+    reasoning: str = ""
+    engine_used: str = "rule_based"
+
+
 class InboundProcessingResult(BaseModel):
     prospect_id: Optional[str] = None
     client_id: Optional[str] = None
@@ -57,6 +64,7 @@ class InboundProcessingResult(BaseModel):
     response_sent: bool
     response_message_id: Optional[str] = None
     suggested_next_action: str
+    engine_used: str = "rule_based"
 
 
 class ConversationEngine:
@@ -145,7 +153,8 @@ class ConversationEngine:
             conversation.last_message_at = payload.received_at
 
             # 6. Intent Classification
-            classification = self.classify_intent(payload.content)
+            class_res = await self.classify_intent_with_reasoning(payload.content)
+            classification = class_res.classification
             if is_opted_out and classification != InboundClassification.OPT_OUT:
                 classification = InboundClassification.OPT_OUT
 
@@ -191,6 +200,43 @@ class ConversationEngine:
             response_sent=response_sent,
             response_message_id=response_msg_id,
             suggested_next_action=next_action,
+            engine_used=class_res.engine_used,
+        )
+
+    async def classify_intent_with_reasoning(self, content: str) -> InboundClassificationResult:
+        """Classifies intent using structured LLM reasoning if configured, falling back to rule-based classification."""
+        from packages.shared.config import settings
+        if settings.NIM_API_KEY:
+            try:
+                from packages.llm.router import llm_router
+                prompt = (
+                    f"Classify the commercial intent of this inbound message into one of: "
+                    f"OPT_OUT, REJECTED, INTERESTED, OBJECTION, QUESTIONS, GENERAL_REPLY.\n"
+                    f"Message: {content}\n"
+                    f"Respond ONLY with valid JSON: {{\"classification\": \"...\", \"confidence\": 0.95, \"reasoning\": \"...\"}}"
+                )
+                res = await llm_router.generate(prompt, temperature=0.1)
+                import json
+                cleaned = res.strip("` \n").removeprefix("json")
+                parsed = json.loads(cleaned)
+                c_str = parsed.get("classification", "").upper()
+                if c_str in InboundClassification.__members__:
+                    return InboundClassificationResult(
+                        classification=InboundClassification[c_str],
+                        confidence=float(parsed.get("confidence", 0.9)),
+                        reasoning=str(parsed.get("reasoning", "")),
+                        engine_used="llm",
+                    )
+            except Exception as e:
+                logger.warning(f"LLM intent classification fallback to rule-based: {e}")
+
+        # Deterministic rule-based classification
+        rule_class = self.classify_intent(content)
+        return InboundClassificationResult(
+            classification=rule_class,
+            confidence=1.0,
+            reasoning=f"Matched deterministic patterns for {rule_class.value}",
+            engine_used="rule_based",
         )
 
     def classify_intent(self, content: str) -> InboundClassification:

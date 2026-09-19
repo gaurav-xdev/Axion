@@ -52,7 +52,7 @@ class SkillExecutionEngine:
         self,
         req: SkillExecutionRequest,
         actor_role: str = "OPERATOR",
-        actor_email: str = "operator@system.local",
+        actor_email: str = "operator@axion.business",
     ) -> SkillExecutionResult:
         start_time = time.monotonic()
 
@@ -523,7 +523,12 @@ class SkillExecutionEngine:
             wf_name = merged.get("workflow_name")
             if not wf_name:
                 raise MissingRequiredContextError("workflow_name", step_id=step.step_id)
-            crm_url = merged.get("crm_api_url") or f"https://api.{merged.get('domain', 'internal.local')}/v1/leads"
+            crm_url = merged.get("crm_api_url")
+            if not crm_url:
+                domain = merged.get("domain")
+                if not domain:
+                    raise MissingRequiredContextError("crm_api_url or domain", step_id=step.step_id)
+                crm_url = f"https://api.{domain}/v1/leads"
             workflow_json = {
                 "name": wf_name,
                 "nodes": [

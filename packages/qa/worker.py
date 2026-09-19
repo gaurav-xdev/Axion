@@ -262,16 +262,34 @@ class QAWorker:
             logger.error(f"Failed persisting QA run records: {e}")
 
     async def execute_sandbox_test(self, test_file_path: Path, timeout_seconds: float = 20.0) -> Tuple[bool, str]:
-        """Executes a test file in an isolated Python subprocess without polluting the host."""
+        """Executes a test file in an isolated Python subprocess without polluting the host or leaking secrets."""
+        import os
         import sys
         import asyncio
         if not test_file_path.exists():
             return False, f"Test file '{test_file_path}' does not exist"
 
+        # Sanitize environment: strip all API keys, secrets, and credentials
+        sensitive_keys = {
+            "DODO_API_KEY", "DODO_WEBHOOK_SECRET", "APP_SECRET", "JWT_SECRET",
+            "NIM_API_KEY", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "SMTP_PASSWORD",
+            "TWILIO_AUTH_TOKEN", "WHATSAPP_ACCESS_TOKEN", "AWS_SECRET_ACCESS_KEY",
+        }
+        sanitized_env = {
+            k: v for k, v in os.environ.items()
+            if k not in sensitive_keys
+            and not k.endswith("_SECRET")
+            and not k.endswith("_KEY")
+            and not k.endswith("_PASSWORD")
+        }
+        sanitized_env["PYTHONPATH"] = str(test_file_path.parent)
+
         cmd = [sys.executable, "-m", "pytest", str(test_file_path), "-v"]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                cwd=str(test_file_path.parent),
+                env=sanitized_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

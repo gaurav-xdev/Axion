@@ -65,9 +65,8 @@ class AntiSpamEngine:
 
             # Check individual contact opt-out
             c_stmt = select(Contact).where(Contact.email == req.recipient)
-            c_res = await session.execute(c_stmt)
-            contact = c_res.scalar_one_or_none()
-            if contact and contact.opt_out:
+            contacts = (await session.execute(c_stmt)).scalars().all()
+            if any(c.opt_out for c in contacts):
                 return False, "Communication rejected: Contact person has opted out"
 
         return True, "Passed all 10 anti-spam and outreach policy checks"

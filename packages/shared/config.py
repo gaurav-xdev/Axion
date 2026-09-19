@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     SMTP_PORT: int = Field(default=587)
     SMTP_USER: str = Field(default="")
     SMTP_PASSWORD: str = Field(default="")
-    SMTP_FROM_EMAIL: str = Field(default="agent@autonomousagency.local")
+    SMTP_FROM_EMAIL: str = Field(default="agent@axion.business")
     SMTP_FROM_NAME: str = Field(default="Autonomous Business Agency")
 
     WHATSAPP_ENABLED: bool = Field(default=False)

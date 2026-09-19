@@ -1,20 +1,23 @@
 """Autonomous Business Agent Lifecycle Orchestrator.
-Coordinates the complete end-to-end commercial execution:
-Discovery -> Qualification -> Outreach -> Requirements Extraction -> Bounded Negotiation ->
-Checkout Creation -> Verified Payment -> Autonomous Planning -> Skill Execution ->
-5-Layer Adversarial QA -> Delivery Manifest Handover -> Outcome & Learning.
+Coordinates the complete end-to-end commercial execution in decoupled, zero-mock phases:
+Phase 1 (Commercial Intake):
+  Discovery -> Qualification -> Outreach -> Requirements Extraction -> Bounded Negotiation -> Checkout Session Creation.
+  Transitions project to PAYMENT_PENDING. Leaves execution paused awaiting external payment.
+
+Phase 2 (Decoupled Execution):
+  Triggered only upon authentic server-side verified payment (PaymentStatus.PAID):
+  Autonomous Planning -> Worker Skill Execution -> Sandboxed Code Generation ->
+  5-Layer Adversarial QA -> Delivery Manifest Handover -> Outcome & Operational Learning.
 """
 
 from datetime import datetime, timedelta, timezone
 import hashlib
-import hmac
 import json
 from typing import Any, Dict, Optional
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from packages.agent.runtime import agent_runtime, emergency_controls
-from packages.agent.state_machine import ProjectStateMachine
 from packages.communications.base import OutboundMessageRequest
 from packages.communications.gateway import communication_gateway
 from packages.observability.logger import logger
@@ -30,11 +33,14 @@ from packages.projects.prospecting import ProspectData, prospecting_engine
 from packages.qa.worker import QAEvaluationRequest, qa_worker
 from packages.shared.config import settings
 from packages.shared.database import async_session_factory
-from packages.shared.exceptions import ProviderNotConfiguredError
+from packages.shared.exceptions import ExternalVerificationRequiredError, ProviderNotConfiguredError
 from packages.shared.models import (
     Artifact,
     ChannelType,
+    Checkout,
     Client,
+    Payment,
+    PaymentStatus,
     Project,
     ProjectStatus,
     ProjectTask,
@@ -52,15 +58,15 @@ from packages.tools.filesystem import resolve_sandboxed_path
 class AutonomousLifecycleEngine:
     """Executes the complete autonomous pipeline across commercial, payment, and deliverable stages."""
 
-    async def run_autonomous_cycle(
+    async def start_commercial_intake(
         self,
         business_name: str,
         domain: str,
         lead_email: str,
         contact_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Runs an end-to-end autonomous commercial and technical delivery cycle."""
-        logger.info(f"Initiating autonomous business cycle for {business_name} ({domain})...")
+        """Executes Phase 1: Commercial discovery, outreach, scoping, quote generation, and checkout creation."""
+        logger.info(f"Initiating commercial intake for {business_name} ({domain})...")
 
         # 1. DISCOVERY & RESEARCH
         prospect_data = ProspectData(
@@ -78,7 +84,7 @@ class AutonomousLifecycleEngine:
         if not emergency_controls.stop_outreach and prospect.qualification_score >= 0.5:
             outreach_req = OutboundMessageRequest(
                 recipient=lead_email,
-                sender="agent@autonomousagency.local",
+                sender=settings.SMTP_FROM_EMAIL,
                 subject="Streamlining lead workflow integration",
                 content=f"Hello {prospect.business_name}, we noticed your online forms could benefit from direct webhook CRM automation.",
                 channel=ChannelType.EMAIL,
@@ -153,33 +159,48 @@ class AutonomousLifecycleEngine:
         chk_res = await dodo_provider.create_checkout(chk_req)
         logger.info(f"One-time project checkout created: {chk_res.checkout_id}")
 
-        # 7. SERVER-SIDE PAYMENT VERIFICATION (Cryptographically Signed Webhook)
-        webhook_secret = settings.DODO_WEBHOOK_SECRET
-        if not webhook_secret:
-            raise ProviderNotConfiguredError(
-                "DODO_WEBHOOK_SECRET",
-                "Cryptographic webhook secret is required for server-side payment verification",
-            )
-
-        simulated_event_id = f"evt_{project_id[:8]}"
-        webhook_payload = {
-            "event_id": simulated_event_id,
-            "event_type": "payment.succeeded",
-            "data": {
-                "checkout_id": chk_res.checkout_id,
-                "amount": int(decision.quoted_price * 100),
-                "metadata": {"project_id": project_id, "client_id": client_id},
-            },
+        return {
+            "status": "CHECKOUT_CREATED",
+            "project_id": project_id,
+            "client_id": client_id,
+            "quote_id": quote_id,
+            "checkout_id": chk_res.checkout_id,
+            "checkout_url": chk_res.checkout_url,
+            "amount": decision.quoted_price,
         }
-        raw_body = json.dumps(webhook_payload).encode()
-        sig = hmac.new(webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
 
-        verified, msg = await payment_verification_service.process_webhook(
-            raw_body=raw_body, signature=sig, event_data=webhook_payload
-        )
-        if not verified:
-            raise RuntimeError(f"Server-side payment verification failed: {msg}")
-        logger.info(f"Server-side payment verification: {verified}, {msg}")
+    async def execute_paid_project(self, project_id: str) -> Dict[str, Any]:
+        """Executes Phase 2: Autonomous planning, worker skills, sandbox QA, delivery, and learning.
+        Strictly requires verified payment in database (PaymentStatus.PAID).
+        """
+        logger.info(f"Validating verified payment before execution of project {project_id}...")
+
+        async with async_session_factory() as session:
+            proj = await session.get(Project, project_id)
+            if not proj:
+                raise ValueError(f"Project '{project_id}' not found")
+
+            # Check for authentic verified payment
+            pay_stmt = select(Payment).where(
+                Payment.project_id == project_id,
+                Payment.status == PaymentStatus.PAID,
+            )
+            verified_payment = (await session.execute(pay_stmt)).scalar_one_or_none()
+
+            if proj.status != ProjectStatus.PAID and not verified_payment:
+                raise ExternalVerificationRequiredError(
+                    entity_id=project_id,
+                    reason=(
+                        f"Project is in status '{proj.status.value}'. "
+                        "Execution is strictly blocked until an authentic external payment has been verified."
+                    ),
+                )
+
+            if proj.status != ProjectStatus.PAID:
+                proj.status = ProjectStatus.PAID
+                await session.commit()
+
+            client_id = proj.client_id
 
         # 8. AUTONOMOUS PROJECT PLANNING
         tasks = await project_planning_engine.plan_project(project_id)
@@ -280,10 +301,49 @@ class AutonomousLifecycleEngine:
             "status": "COMPLETED",
             "project_id": project_id,
             "client_id": client_id,
-            "checkout_id": chk_res.checkout_id,
             "qa_passed": qa_res.passed,
             "qa_score": qa_res.score,
             "artifact_id": artifact_id,
+        }
+
+    async def run_autonomous_cycle(
+        self,
+        business_name: str,
+        domain: str,
+        lead_email: str,
+        contact_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Runs the autonomous intake cycle and advances to execution if payment has been verified."""
+        intake_res = await self.start_commercial_intake(
+            business_name=business_name,
+            domain=domain,
+            lead_email=lead_email,
+            contact_name=contact_name,
+        )
+
+        project_id = intake_res["project_id"]
+
+        # Check if project has already received verified payment
+        async with async_session_factory() as session:
+            pay_stmt = select(Payment).where(
+                Payment.project_id == project_id,
+                Payment.status == PaymentStatus.PAID,
+            )
+            payment = (await session.execute(pay_stmt)).scalar_one_or_none()
+
+        if payment:
+            exec_res = await self.execute_paid_project(project_id)
+            return {**intake_res, **exec_res}
+
+        return {
+            "status": "CHECKOUT_CREATED",
+            "payment_status": "PAYMENT_PENDING",
+            "project_id": intake_res["project_id"],
+            "client_id": intake_res["client_id"],
+            "quote_id": intake_res["quote_id"],
+            "checkout_id": intake_res["checkout_id"],
+            "checkout_url": intake_res["checkout_url"],
+            "amount": intake_res["amount"],
         }
 
 

@@ -470,7 +470,7 @@ async def inbound_communication_webhook(
 
     sender = body.get("sender") or body.get("from") or body.get("email")
     content = body.get("content") or body.get("text") or body.get("body")
-    recipient = body.get("recipient") or body.get("to") or "agent@autonomousagency.local"
+    recipient = body.get("recipient") or body.get("to") or settings.SMTP_FROM_EMAIL
     channel_str = body.get("channel", "EMAIL").upper()
     channel = ChannelType[channel_str] if channel_str in ChannelType.__members__ else ChannelType.EMAIL
 
@@ -698,7 +698,9 @@ async def trigger_skill_execution(
 ):
     """Execute a skill within authoritative emergency, RBAC, and ToolGateway limits."""
     actor_role = payload.get("role", "OPERATOR")
-    actor_email = payload.get("sub", "operator@system.local")
+    actor_email = payload.get("sub") or payload.get("email")
+    if not actor_email:
+        raise HTTPException(status_code=401, detail="Token missing subject identity")
     result = await skill_engine.execute_skill(req, actor_role=actor_role, actor_email=actor_email)
     return result.model_dump()
 

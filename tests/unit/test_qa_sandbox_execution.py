@@ -31,3 +31,21 @@ async def test_qa_worker_sandbox_test_failure(tmp_path):
     passed, output = await qa_worker.execute_sandbox_test(test_file, timeout_seconds=10.0)
     assert passed is False
     assert "AssertionError" in output or "FAILED" in output
+
+
+@pytest.mark.asyncio
+async def test_qa_worker_sandbox_sanitizes_environment(tmp_path, monkeypatch):
+    """Verify execute_sandbox_test does not leak sensitive credentials into the subprocess."""
+    monkeypatch.setenv("DODO_API_KEY", "super_secret_dodo_key")
+    monkeypatch.setenv("APP_SECRET", "super_secret_app_secret")
+
+    test_file = tmp_path / "test_env_leak.py"
+    test_file.write_text(
+        "import os\n"
+        "def test_no_secrets():\n"
+        "    assert 'DODO_API_KEY' not in os.environ\n"
+        "    assert 'APP_SECRET' not in os.environ\n"
+    )
+
+    passed, output = await qa_worker.execute_sandbox_test(test_file, timeout_seconds=10.0)
+    assert passed is True, f"Secrets leaked into sandbox subprocess: {output}"

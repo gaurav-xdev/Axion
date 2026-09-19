@@ -34,6 +34,8 @@ class ProjectOutcomeRecord(BaseModel):
     tasks_count: int
     tasks_passed: int
     qa_defect_count: int
+    internal_cost_usd: float = 0.0
+    cost_basis: str = "MEASURED_TELEMETRY"
     profit_margin: float
     lessons_learned: List[str] = Field(default_factory=list)
     recorded_at: datetime = Field(default_factory=utc_now)
@@ -71,8 +73,21 @@ class OutcomeLearningEngine:
             calibration_ratio = round(actual_duration_hours / estimated_hours, 2)
 
             revenue = float(project.accepted_price)
-            # Internal cost baseline: $50/hour + estimated LLM/tool cost
-            internal_cost = actual_duration_hours * 50.0
+            # Calculate actual compute, tool and token costs from task evidence telemetry
+            measured_cost = 0.0
+            has_telemetry = False
+            for t in tasks:
+                if t.evidence and isinstance(t.evidence, dict):
+                    exec_cost = t.evidence.get("estimated_cost_usd") or t.evidence.get("cost_usd")
+                    if exec_cost is not None:
+                        measured_cost += float(exec_cost)
+                        has_telemetry = True
+                    elif "tokens_used" in t.evidence:
+                        measured_cost += (float(t.evidence["tokens_used"]) / 1000.0) * 0.002
+                        has_telemetry = True
+
+            internal_cost = round(measured_cost, 4)
+            cost_basis = "TASK_EVIDENCE_TELEMETRY" if has_telemetry else "ZERO_RECORDED_EXPENSE"
             profit_margin = round(max(0.0, (revenue - internal_cost) / revenue) if revenue > 0 else 0.0, 2)
 
             lessons = []
@@ -96,6 +111,8 @@ class OutcomeLearningEngine:
                 tasks_count=len(tasks),
                 tasks_passed=len(passed_tasks),
                 qa_defect_count=len(findings),
+                internal_cost_usd=internal_cost,
+                cost_basis=cost_basis,
                 profit_margin=profit_margin,
                 lessons_learned=lessons,
             )

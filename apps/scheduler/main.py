@@ -22,6 +22,7 @@ from packages.shared.config import settings
 from packages.shared.database import async_session_factory, close_db, init_db
 from packages.shared.models import (
     Client,
+    Contact,
     Payment,
     PaymentStatus,
     Project,
@@ -109,7 +110,14 @@ class AutonomousSchedulerService:
                 task_id = f"task_exec_{proj.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
                 from packages.agent.dispatcher import DispatchTaskMessage
 
-                safe_domain = proj.name.lower().replace(" ", "") + ".local"
+                client_stmt = select(Client).where(Client.id == proj.client_id)
+                client_obj = (await session.execute(client_stmt)).scalar_one_or_none()
+                client_domain = None
+                if client_obj and client_obj.email and "@" in client_obj.email:
+                    client_domain = client_obj.email.split("@")[-1].strip().lower()
+                clean_name = "".join(c for c in proj.name.lower() if c.isalnum())
+                safe_domain = client_domain or f"{clean_name}.com"
+
                 task_msg = DispatchTaskMessage(
                     task_id=task_id,
                     project_id=proj.id,
@@ -151,8 +159,25 @@ class AutonomousSchedulerService:
             )
             qual_prospects = (await session.execute(qual_stmt)).scalars().all()
             for q_p in qual_prospects:
-                if not emergency.is_stopped:
-                    dispatched_counts["outreach"] += 1
+                if not emergency.is_stopped and not emergency.is_paused:
+                    contact_stmt = select(Contact).where(Contact.prospect_id == q_p.id)
+                    contact = (await session.execute(contact_stmt)).scalars().first()
+                    if contact and contact.email and not contact.opt_out and not q_p.opt_out:
+                        from packages.communications.base import OutboundMessageRequest
+                        from packages.communications.gateway import communication_gateway
+                        outreach_req = OutboundMessageRequest(
+                            recipient=contact.email,
+                            sender=settings.SMTP_FROM_EMAIL,
+                            channel="EMAIL",
+                            subject=f"Workflow Automation: {q_p.business_name}",
+                            content=f"Hello {contact.name or 'there'},\n\nWe identified potential workflow automation efficiencies for {q_p.business_name}.\n\nBest regards,\nAxion Team",
+                            prospect_id=q_p.id,
+                        )
+                        await communication_gateway.dispatch(outreach_req)
+                        q_p.status = "CONTACTED"
+                        q_p.last_contacted_at = datetime.now(timezone.utc)
+                        dispatched_counts["outreach"] += 1
+                        logger.info(f"Scheduler dispatched outreach communication to {contact.email} for prospect {q_p.id}")
 
             await session.commit()
 

@@ -6,6 +6,7 @@ as first-class BaseTool implementations.
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from packages.shared.config import settings
 from packages.shared.models import ChannelType, ToolRiskLevel
 from packages.tools.base import BaseTool, ToolRequest
 
@@ -16,7 +17,7 @@ from packages.tools.base import BaseTool, ToolRequest
 
 class CommunicationDispatchInput(BaseModel):
     recipient: str = Field(description="Target phone number or email address")
-    sender: str = Field(default="agent@autonomousagency.local", description="Authoritative sender address")
+    sender: str = Field(default_factory=lambda: settings.SMTP_FROM_EMAIL, description="Authoritative sender address")
     channel: str = Field(default="EMAIL", description="Communication channel: EMAIL, WHATSAPP, VOICE, SYSTEM")
     content: str = Field(description="Message body text")
     subject: Optional[str] = Field(default=None, description="Email subject if applicable")

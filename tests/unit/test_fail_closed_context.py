@@ -89,3 +89,24 @@ async def test_transform_action_fails_closed_on_missing_proposal_fields():
             accumulated_outputs={},
         )
     assert exc_info.value.missing_key == "price"
+
+
+@pytest.mark.asyncio
+async def test_transform_action_fails_closed_on_missing_crm_url_and_domain():
+    """Workflow creation must raise MissingRequiredContextError when both crm_api_url and domain are absent."""
+    step = ProcedureStep(
+        step_id="construct_workflow_spec",
+        description="Construct workflow spec",
+        objective="Create n8n workflow",
+        action_type="TRANSFORM",
+        expected_output="Done",
+    )
+    starter = [s for s in get_starter_skills() if s.skill_id == "build_n8n_automation"][0]
+    with pytest.raises(MissingRequiredContextError) as exc_info:
+        skill_engine._execute_transform_action(
+            step=step,
+            skill=starter,
+            input_data={"workflow_name": "MyWorkflow"},
+            accumulated_outputs={},
+        )
+    assert "crm_api_url or domain" in str(exc_info.value)

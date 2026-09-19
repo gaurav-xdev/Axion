@@ -1,12 +1,19 @@
-"""Full Sandbox End-to-End Test for the Autonomous Business Agent Lifecycle.
-Tests complete commercial and technical execution:
-Prospecting -> Qualification -> Outreach -> Scoping -> Checkout -> Verified Payment -> Sandboxed Coding -> Independent 5-Layer QA -> Delivery.
+"""Live External Sandbox End-to-End Test for the Autonomous Business Agent.
+Validates live external provider integration against Dodo Payments Sandbox.
+Strictly zero-mock: if external sandbox credentials are not configured in the host
+environment, the test is marked as BLOCKED_EXTERNAL_DEPENDENCY (skipped) rather than
+fabricating synthetic success.
 """
 
+import os
+import uuid
 import pytest
+
 from packages.agent.lifecycle import autonomous_engine
+from packages.shared.config import settings
 from packages.shared.database import async_session_factory, init_db
-from packages.shared.models import Artifact, Payment, Project, ProjectStatus, QARun
+from packages.shared.exceptions import ExternalVerificationRequiredError
+from packages.shared.models import Project, ProjectStatus
 
 
 @pytest.fixture(autouse=True)
@@ -15,65 +22,40 @@ async def setup_db():
 
 
 @pytest.mark.asyncio
-async def test_full_autonomous_business_cycle(monkeypatch):
-    import uuid
-    from datetime import datetime, timedelta, timezone
-    from packages.payments.base import CheckoutResponse
-    from packages.payments.dodo import dodo_provider
-    from packages.shared.models import PaymentStatus
+async def test_live_dodo_sandbox_e2e():
+    """Live sandbox verification against external Dodo Payments API.
+    Fails closed / skips if real external credentials are not present in environment.
+    """
+    api_key = settings.DODO_API_KEY or os.environ.get("DODO_API_KEY")
+    webhook_secret = settings.DODO_WEBHOOK_SECRET or os.environ.get("DODO_WEBHOOK_SECRET")
 
-    async def mock_create_checkout(req):
-        return CheckoutResponse(
-            checkout_id=f"chk_e2e_{req.project_id[:8]}",
-            checkout_url=f"https://test.dodopayments.com/checkout/chk_e2e_{req.project_id[:8]}",
-            amount=req.amount,
-            currency=req.currency,
-            status=PaymentStatus.CHECKOUT_CREATED,
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    if not api_key or not webhook_secret:
+        pytest.skip(
+            "BLOCKED_EXTERNAL_DEPENDENCY: Real Dodo sandbox credentials "
+            "(DODO_API_KEY, DODO_WEBHOOK_SECRET) are not configured in environment. "
+            "Zero-mock rule: live external payment verification is marked UNVERIFIED/BLOCKED."
         )
 
-    monkeypatch.setattr(dodo_provider, "create_checkout", mock_create_checkout)
-    from packages.shared.config import settings
-    monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", "test_webhook_secret_key_12345")
-    monkeypatch.setattr(dodo_provider, "webhook_secret", "test_webhook_secret_key_12345")
     uid = str(uuid.uuid4())[:8]
 
-    # Execute full autonomous lifecycle
-    result = await autonomous_engine.run_autonomous_cycle(
-        business_name=f"Vertex Logistics {uid}",
-        domain=f"vertexlogistics_{uid}.io",
-        lead_email=f"ops_{uid}@vertexlogistics.io",
+    # Execute Phase 1: Real Commercial Intake against live Dodo Sandbox API
+    intake = await autonomous_engine.start_commercial_intake(
+        business_name=f"Live Enterprise {uid}",
+        domain=f"live-enterprise-{uid}.com",
+        lead_email=f"contact_{uid}@live-enterprise-{uid}.com",
     )
 
-    assert result["status"] == "COMPLETED"
-    assert result["qa_passed"] is True
-    assert result["qa_score"] == 1.0
+    assert intake["status"] == "CHECKOUT_CREATED"
+    assert intake["checkout_id"]
+    assert intake["checkout_url"].startswith("https://")
+    project_id = intake["project_id"]
 
-    project_id = result["project_id"]
-
-    # Verify Database State Integrity
+    # Verify project is recorded in DB awaiting external payment
     async with async_session_factory() as session:
-        # Project must be COMPLETED
         proj = await session.get(Project, project_id)
         assert proj is not None
-        assert proj.status == ProjectStatus.COMPLETED
+        assert proj.status != ProjectStatus.COMPLETED
 
-        # Verified Payment record must exist
-        from sqlalchemy import select
-        pay_stmt = select(Payment).where(Payment.project_id == project_id)
-        payment = (await session.execute(pay_stmt)).scalar_one_or_none()
-        assert payment is not None
-        assert payment.status.value == "PAID"
-        assert payment.amount == 350.0
-
-        # Physical Artifacts must exist with valid SHA256 hash
-        art_stmt = select(Artifact).where(Artifact.project_id == project_id)
-        artifacts = (await session.execute(art_stmt)).scalars().all()
-        assert len(artifacts) >= 1
-        assert any(art.name == "webhook_receiver.py" and len(art.file_hash) == 64 for art in artifacts)
-
-        # Independent QA Run must be PASSED
-        qa_stmt = select(QARun).where(QARun.project_id == project_id)
-        qa_runs = (await session.execute(qa_stmt)).scalars().all()
-        assert len(qa_runs) >= 1
-        assert any(qa.status == "PASSED" and qa.score == 1.0 for qa in qa_runs)
+    # Verify fail-closed enforcement: execution is strictly blocked until external payment is verified
+    with pytest.raises(ExternalVerificationRequiredError):
+        await autonomous_engine.execute_paid_project(project_id)

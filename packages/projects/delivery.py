@@ -14,6 +14,7 @@ from sqlalchemy import select
 from packages.communications.base import OutboundMessageRequest
 from packages.communications.gateway import CommunicationGateway
 from packages.observability.logger import logger
+from packages.shared.config import settings
 from packages.shared.database import async_session_factory
 from packages.shared.models import (
     Artifact,
@@ -165,7 +166,7 @@ class ProjectDeliveryEngine:
 
         outbound_req = OutboundMessageRequest(
             recipient=client_email,
-            sender="deliveries@autonomousagency.local",
+            sender=settings.SMTP_FROM_EMAIL,
             channel=ChannelType.EMAIL,
             subject=f"Deliverable Handover: {proj_name}",
             content=delivery_email_body,

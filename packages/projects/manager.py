@@ -10,6 +10,7 @@ from sqlalchemy import select
 from packages.observability.logger import logger
 from packages.shared.database import async_session_factory
 from packages.shared.models import (
+    Client,
     Project,
     ProjectStatus,
     ProjectTask,
@@ -91,7 +92,17 @@ class ProjectPlanningEngine:
             import re
             combined_desc = f"{project.name} {project.description} " + " ".join(r.description for r in requirements)
             url_match = re.search(r"https?://[^\s'\"]+", combined_desc)
-            resolved_base_url = url_match.group(0) if url_match else f"https://api.{project.name.lower().replace(' ', '')}.local"
+            if url_match:
+                resolved_base_url = url_match.group(0)
+            else:
+                client_stmt = select(Client).where(Client.id == project.client_id)
+                client_obj = (await session.execute(client_stmt)).scalar_one_or_none()
+                client_domain = None
+                if client_obj and client_obj.email and "@" in client_obj.email:
+                    client_domain = client_obj.email.split("@")[-1].strip().lower()
+                clean_name = re.sub(r"[^a-zA-Z0-9]", "", project.name.lower())
+                domain_to_use = client_domain or f"{clean_name}.com"
+                resolved_base_url = f"https://api.{domain_to_use}"
 
             # MILESTONE 1: Deliverable Engineering
             task_eng = ProjectTask(
