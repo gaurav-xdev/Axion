@@ -55,6 +55,12 @@ async def init_db() -> None:
                 columns = [row[1] for row in res.fetchall()]
                 if columns and "certainty" not in columns:
                     await conn.execute(text("ALTER TABLE requirements ADD COLUMN certainty VARCHAR(32) DEFAULT 'CLIENT_STATED' NOT NULL;"))
+                if columns and "source_message_id" not in columns:
+                    await conn.execute(text("ALTER TABLE requirements ADD COLUMN source_message_id VARCHAR(64);"))
+                if columns and "source_text_reference" not in columns:
+                    await conn.execute(text("ALTER TABLE requirements ADD COLUMN source_text_reference TEXT;"))
+                if columns and "confidence" not in columns:
+                    await conn.execute(text("ALTER TABLE requirements ADD COLUMN confidence FLOAT DEFAULT 1.0 NOT NULL;"))
             except Exception:
                 pass
 

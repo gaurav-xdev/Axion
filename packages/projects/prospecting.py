@@ -3,6 +3,7 @@ Discovers, normalizes, deduplicates, scores, and qualifies business prospects.
 """
 
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field
@@ -13,6 +14,20 @@ from packages.shared.database import async_session_factory
 from packages.shared.models import Contact, Prospect
 
 
+class ObservationType(str, Enum):
+    FACT = "FACT"
+    INFERENCE = "INFERENCE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ResearchObservation(BaseModel):
+    observation_type: ObservationType
+    statement: str
+    confidence: float = 1.0
+    source_url: Optional[str] = None
+    extracted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ProspectData(BaseModel):
     business_name: str
     website: str
@@ -21,6 +36,7 @@ class ProspectData(BaseModel):
     contact_email: Optional[str] = None
     observed_pain_points: List[str] = Field(default_factory=list)
     evidence_urls: List[str] = Field(default_factory=list)
+    observations: List[ResearchObservation] = Field(default_factory=list)
 
 
 def normalize_domain(url: str) -> str:
@@ -52,8 +68,16 @@ class ProspectingEngine:
         elif prospect.contact_name:
             score += 0.15
 
-        # Has verifiable observed pain points
-        if prospect.observed_pain_points:
+        # Has verifiable observed pain points or observations
+        if prospect.observations:
+            obs_score = 0.0
+            for obs in prospect.observations:
+                if obs.observation_type == ObservationType.FACT:
+                    obs_score += 0.15 * obs.confidence
+                elif obs.observation_type == ObservationType.INFERENCE:
+                    obs_score += 0.10 * obs.confidence
+            score += min(obs_score, 0.3)
+        elif prospect.observed_pain_points:
             score += min(len(prospect.observed_pain_points) * 0.15, 0.3)
 
         return min(round(score, 2), 1.0)
@@ -78,6 +102,7 @@ class ProspectingEngine:
                 return existing
 
             # Create new prospect
+            observations_data = [obs.model_dump(mode="json") for obs in data.observations]
             new_prospect = Prospect(
                 business_name=data.business_name,
                 website=data.website,
@@ -85,8 +110,15 @@ class ProspectingEngine:
                 industry=data.industry,
                 qualification_score=score,
                 status="QUALIFIED" if score >= 0.6 else "DISCOVERED",
-                pain_points={"points": data.observed_pain_points},
-                evidence_sources={"urls": data.evidence_urls, "discovered_at": datetime.now(timezone.utc).isoformat()},
+                pain_points={
+                    "points": data.observed_pain_points,
+                    "observations": observations_data,
+                },
+                evidence_sources={
+                    "urls": data.evidence_urls,
+                    "discovered_at": datetime.now(timezone.utc).isoformat(),
+                    "observations_count": len(observations_data),
+                },
             )
             session.add(new_prospect)
             await session.flush()
@@ -125,28 +157,77 @@ class ProspectingEngine:
 
         observed_pain_points: List[str] = []
         evidence_urls: List[str] = [target_url]
+        observations: List[ResearchObservation] = []
         contact_email: Optional[str] = None
 
         if browser_res.success:
             resolved_name = business_name or browser_res.title.strip() or norm_domain
             text_corpus = " ".join(browser_res.extracted_text.values()).lower()
 
+            observations.append(
+                ResearchObservation(
+                    observation_type=ObservationType.FACT,
+                    statement=f"Reachable website verified at {target_url} with title '{browser_res.title.strip()}'",
+                    confidence=1.0,
+                    source_url=target_url,
+                )
+            )
+
             # Analyze signals
             if "contact" in text_corpus or "quote" in text_corpus:
                 observed_pain_points.append("Manual quotation/inquiry intake process")
+                observations.append(
+                    ResearchObservation(
+                        observation_type=ObservationType.INFERENCE,
+                        statement="Website features manual contact/quote submission flow",
+                        confidence=0.85,
+                        source_url=target_url,
+                    )
+                )
             if "schedule" in text_corpus or "calendar" in text_corpus:
                 observed_pain_points.append("Unautomated booking or appointment workflow")
-            if not observed_pain_points:
-                observed_pain_points.append("Opportunities for automated lead webhook processing")
+                observations.append(
+                    ResearchObservation(
+                        observation_type=ObservationType.INFERENCE,
+                        statement="Website indicates scheduling or appointment requests requiring automated coordination",
+                        confidence=0.80,
+                        source_url=target_url,
+                    )
+                )
 
             # Extract email if present in text
             import re
             emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text_corpus)
             if emails:
                 contact_email = emails[0]
+                observations.append(
+                    ResearchObservation(
+                        observation_type=ObservationType.FACT,
+                        statement=f"Public contact email identified: {contact_email}",
+                        confidence=1.0,
+                        source_url=target_url,
+                    )
+                )
+
+            if not observed_pain_points:
+                observations.append(
+                    ResearchObservation(
+                        observation_type=ObservationType.UNKNOWN,
+                        statement="No workflow automation bottlenecks identified from public homepage",
+                        confidence=0.0,
+                        source_url=target_url,
+                    )
+                )
         else:
             resolved_name = business_name or norm_domain
-            observed_pain_points.append("Domain presence detected; automated CRM integration potential")
+            observations.append(
+                ResearchObservation(
+                    observation_type=ObservationType.UNKNOWN,
+                    statement=f"Target domain inspection failed or timed out: {browser_res.error or 'unreachable'}",
+                    confidence=0.0,
+                    source_url=target_url,
+                )
+            )
 
         prospect_data = ProspectData(
             business_name=resolved_name,
@@ -155,6 +236,7 @@ class ProspectingEngine:
             contact_email=contact_email,
             observed_pain_points=observed_pain_points,
             evidence_urls=evidence_urls,
+            observations=observations,
         )
         return await self.ingest_prospect(prospect_data)
 

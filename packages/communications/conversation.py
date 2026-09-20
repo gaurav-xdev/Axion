@@ -55,6 +55,17 @@ class InboundClassificationResult(BaseModel):
     engine_used: str = "rule_based"
 
 
+class ConversationReasoningResult(BaseModel):
+    classification: InboundClassification
+    confidence: float = 1.0
+    reasoning: str = ""
+    requirements_status: str = "NONE"  # NONE, REQUIREMENTS_PENDING, REQUIREMENTS_COMPLETE
+    extracted_requirements: Optional[Any] = None
+    client_id: Optional[str] = None
+    project_id: Optional[str] = None
+    quote_id: Optional[str] = None
+
+
 class InboundProcessingResult(BaseModel):
     prospect_id: Optional[str] = None
     client_id: Optional[str] = None
@@ -65,6 +76,11 @@ class InboundProcessingResult(BaseModel):
     response_message_id: Optional[str] = None
     suggested_next_action: str
     engine_used: str = "rule_based"
+    requirements_status: str = "NONE"
+    extracted_requirements: Optional[Any] = None
+    project_id: Optional[str] = None
+    quote_id: Optional[str] = None
+    reasoning: str = ""
 
 
 class ConversationEngine:
@@ -171,8 +187,24 @@ class ConversationEngine:
             inbound_id = inbound_msg.id
             conv_id = conversation.id
 
-        # 8. Generate and Dispatch Contextual Reply (outside session block)
+        # 8. Structured Reasoning for Inbound Commercial Inquiry
+        reasoning_res: Optional[ConversationReasoningResult] = None
+        if classification == InboundClassification.INTERESTED:
+            reasoning_res = await self.reason_over_inbound_inquiry(
+                sender=payload.sender,
+                content=payload.content,
+                source_message_id=inbound_id,
+                prospect_id=prospect_id,
+                client_id=client_id,
+            )
+            if reasoning_res.client_id:
+                client_id = reasoning_res.client_id
+
+        # 9. Generate and Dispatch Contextual Reply (outside session block)
         reply_content, next_action = self._compose_reply_text(classification, payload.sender)
+        if reasoning_res and reasoning_res.requirements_status == "REQUIREMENTS_COMPLETE" and reasoning_res.quote_id:
+            next_action = "PROPOSE_QUOTE"
+
         response_sent = False
         response_msg_id = None
 
@@ -201,6 +233,11 @@ class ConversationEngine:
             response_message_id=response_msg_id,
             suggested_next_action=next_action,
             engine_used=class_res.engine_used,
+            requirements_status=reasoning_res.requirements_status if reasoning_res else "NONE",
+            extracted_requirements=reasoning_res.extracted_requirements if reasoning_res else None,
+            project_id=reasoning_res.project_id if reasoning_res else None,
+            quote_id=reasoning_res.quote_id if reasoning_res else None,
+            reasoning=reasoning_res.reasoning if reasoning_res else class_res.reasoning,
         )
 
     async def classify_intent_with_reasoning(self, content: str) -> InboundClassificationResult:
@@ -289,6 +326,13 @@ class ConversationEngine:
             r"\bcan you build\b",
             r"\bcan you implement\b",
             r"\bwe need help with\b",
+            r"\bwe need\b",
+            r"\bneed a\b",
+            r"\bneed an\b",
+            r"\blooking to\b",
+            r"\blooking for\b",
+            r"\bwant to build\b",
+            r"\brequire\b",
         ]
         if any(re.search(pat, normalized) for pat in interested_patterns):
             return InboundClassification.INTERESTED
@@ -483,6 +527,109 @@ class ConversationEngine:
                 "Thank you for your message. An engineer has received your note and will follow up shortly with details."
             )
             return (text, "CONTINUE_CONVERSATION")
+
+    async def reason_over_inbound_inquiry(
+        self,
+        sender: str,
+        content: str,
+        source_message_id: Optional[str] = None,
+        prospect_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+    ) -> ConversationReasoningResult:
+        """Reasons over inbound client inquiry to determine whether requirements are pending or complete,
+        and provisions Client, Project, and Authoritative Quote only when requirements are concrete.
+        """
+        from packages.projects.negotiation import requirements_extractor, negotiation_engine
+        from packages.projects.acceptance import project_acceptance_engine, ProjectAssessmentRequest
+
+        extracted = requirements_extractor.extract(content, source_message_id=source_message_id)
+
+        # Check if client has provided concrete implementation specifications or is asking initial inquiry
+        has_detailed_spec = any(k in content.lower() for k in ["endpoint", "payload", "schema", "header", "secret", "fastapi", "database", "webhook receiver"]) and len(content.split()) >= 8
+        if not has_detailed_spec or not extracted.ready_for_quote or len(extracted.deliverables) < 2:
+            return ConversationReasoningResult(
+                classification=InboundClassification.INTERESTED,
+                confidence=0.85,
+                reasoning=f"Identified interest; gathering specifications and constraints before formal quote.",
+                requirements_status="REQUIREMENTS_PENDING",
+                extracted_requirements=extracted,
+                client_id=client_id,
+                project_id=None,
+                quote_id=None,
+            )
+
+        # Requirements are complete enough for client onboarding & quote
+        async with async_session_factory() as session:
+            # Resolve or create Client
+            resolved_client_id = client_id
+            if resolved_client_id:
+                client = await session.get(Client, resolved_client_id)
+            else:
+                stmt_c = select(Client).where(Client.email == sender)
+                client = (await session.execute(stmt_c)).scalars().first()
+
+            if not client:
+                company_name = None
+                if prospect_id:
+                    prosp = await session.get(Prospect, prospect_id)
+                    if prosp:
+                        company_name = prosp.business_name
+                clean_name = sender.split("@")[0].replace(".", " ").title() if "@" in sender else "Client"
+                client = Client(
+                    name=clean_name,
+                    email=sender,
+                    company=company_name or clean_name,
+                )
+                session.add(client)
+                await session.flush()
+            resolved_client_id = client.id
+
+            # Create Project
+            # Create Project
+            project = Project(
+                client_id=resolved_client_id,
+                name=extracted.project_title,
+                description=f"Autonomous project for {extracted.project_title} derived from client requirements",
+                status=ProjectStatus.CONVERSATION_ACTIVE,
+            )
+            session.add(project)
+            await session.commit()
+            resolved_project_id = project.id
+
+        # Evaluate project feasibility
+        assessment = project_acceptance_engine.evaluate(
+            ProjectAssessmentRequest(
+                title=extracted.project_title,
+                description=content[:200],
+                requested_price=0.0,
+                estimated_effort_hours=extracted.estimated_effort_hours,
+                integration_count=extracted.estimated_integration_count,
+                known_requirements=extracted.deliverables,
+            )
+        )
+
+        # Create Authoritative Quote
+        quote = await negotiation_engine.create_authoritative_quote(
+            project_id=resolved_project_id,
+            client_id=resolved_client_id,
+            amount=assessment.quoted_price,
+            scope_summary=f"Deliverables for {extracted.project_title}",
+            requirements=extracted.tagged_requirements or extracted.deliverables,
+            max_revisions=assessment.max_revisions,
+            valid_days=7,
+        )
+        resolved_quote_id = quote.id
+
+        return ConversationReasoningResult(
+            classification=InboundClassification.INTERESTED,
+            confidence=1.0,
+            reasoning="Requirements concrete; Client, Project, and Authoritative Quote successfully established.",
+            requirements_status="REQUIREMENTS_COMPLETE",
+            extracted_requirements=extracted,
+            client_id=resolved_client_id,
+            project_id=resolved_project_id,
+            quote_id=resolved_quote_id,
+        )
 
 
 # Authoritative singleton conversation engine

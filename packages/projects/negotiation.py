@@ -39,7 +39,7 @@ class ExtractedRequirements(BaseModel):
     acceptance_criteria: List[str] = Field(default_factory=list)
     technical_constraints: List[str] = Field(default_factory=list)
     unresolved_unknowns: List[str] = Field(default_factory=list)
-    tagged_requirements: List[Dict[str, str]] = Field(default_factory=list)
+    tagged_requirements: List[Dict[str, Any]] = Field(default_factory=list)
     estimated_integration_count: int = 1
     estimated_effort_hours: float = 4.0
     ready_for_quote: bool = True
@@ -59,7 +59,12 @@ class NegotiationResult(BaseModel):
 class RequirementsExtractor:
     """Extracts structured engineering deliverables and criteria from client messages."""
 
-    def extract(self, client_text: str, context: Optional[Dict[str, Any]] = None) -> ExtractedRequirements:
+    def extract(
+        self,
+        client_text: str,
+        context: Optional[Dict[str, Any]] = None,
+        source_message_id: Optional[str] = None,
+    ) -> ExtractedRequirements:
         text_lower = client_text.lower()
         ctx = context or {}
 
@@ -83,66 +88,160 @@ class RequirementsExtractor:
             proj_type = "AUTOMATION"
             title = ctx.get("title") or "Business Workflow Automation"
 
-        # 2. Extract Deliverables with Certainty Tagging
+        # 2. Extract Deliverables with Provenance and Certainty Tagging
         deliverables: List[str] = []
-        tagged_requirements: List[Dict[str, str]] = []
+        tagged_requirements: List[Dict[str, Any]] = []
 
-        if proj_type == "AUTOMATION":
+        # Granular extraction based on actual client text
+        if "n8n" in text_lower:
             deliverables.append("Production-ready n8n workflow JSON configuration")
             tagged_requirements.append({
                 "title": "n8n Workflow Configuration",
                 "description": "Production-ready n8n workflow JSON configuration",
                 "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "n8n workflow",
+                "confidence": 1.0,
             })
+        if "fastapi" in text_lower:
+            deliverables.append("FastAPI production webhook route handler")
+            tagged_requirements.append({
+                "title": "FastAPI Webhook Route",
+                "description": "FastAPI production webhook route handler",
+                "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "FastAPI",
+                "confidence": 1.0,
+            })
+        if "hmac" in text_lower or "signature" in text_lower:
+            deliverables.append("Cryptographic HMAC SHA-256 signature verification")
+            tagged_requirements.append({
+                "title": "HMAC SHA-256 Verification",
+                "description": "Cryptographic HMAC SHA-256 signature verification",
+                "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "HMAC signature verification",
+                "confidence": 1.0,
+            })
+        if "slack" in text_lower:
+            deliverables.append("Slack notification alert dispatch integration")
+            tagged_requirements.append({
+                "title": "Slack Notification Integration",
+                "description": "Dispatch formatted status notifications to Slack webhook",
+                "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "notify on Slack",
+                "confidence": 1.0,
+            })
+        if "crm" in text_lower or "lead" in text_lower:
+            deliverables.append("Inbound lead intake and CRM synchronization")
+            tagged_requirements.append({
+                "title": "CRM Lead Sync",
+                "description": "Transform and forward inbound leads to CRM endpoint",
+                "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "CRM sync",
+                "confidence": 1.0,
+            })
+        if "api client" in text_lower or "rest api" in text_lower:
+            deliverables.append("Async Python httpx client with connection pooling and retries")
+            tagged_requirements.append({
+                "title": "Async REST Client",
+                "description": "Async Python httpx client with connection pooling and retries",
+                "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": "API client",
+                "confidence": 1.0,
+            })
+
+        # Fallback/Inferred engineering components if specific elements were not explicitly broken down
+        if proj_type == "AUTOMATION":
+            if not any(d for d in deliverables if "n8n" in d):
+                deliverables.append("Production-ready n8n workflow JSON configuration")
+                tagged_requirements.append({
+                    "title": "n8n Workflow Configuration",
+                    "description": "Production-ready n8n workflow JSON configuration",
+                    "certainty": "INFERRED",
+                    "source_message_id": source_message_id,
+                    "source_text_reference": client_text[:100],
+                    "confidence": 0.85,
+                })
             deliverables.append("Tested webhook inbound trigger and payload transformer")
             tagged_requirements.append({
                 "title": "Inbound Webhook Trigger",
                 "description": "Tested webhook inbound trigger and payload transformer",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.85,
             })
             deliverables.append("Error notification dispatch handler")
             tagged_requirements.append({
                 "title": "Error Dispatch Handler",
                 "description": "Error notification dispatch handler",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.80,
             })
         elif proj_type == "WEBHOOK":
-            deliverables.append("FastAPI production webhook route handler")
-            tagged_requirements.append({
-                "title": "FastAPI Webhook Route",
-                "description": "FastAPI production webhook route handler",
-                "certainty": "CLIENT_STATED",
-            })
-            deliverables.append("Cryptographic HMAC SHA-256 signature verification")
-            tagged_requirements.append({
-                "title": "HMAC SHA-256 Verification",
-                "description": "Cryptographic HMAC SHA-256 signature verification",
-                "certainty": "INFERRED",
-            })
+            if not any(d for d in deliverables if "FastAPI" in d):
+                deliverables.append("FastAPI production webhook route handler")
+                tagged_requirements.append({
+                    "title": "FastAPI Webhook Route",
+                    "description": "FastAPI production webhook route handler",
+                    "certainty": "INFERRED",
+                    "source_message_id": source_message_id,
+                    "source_text_reference": client_text[:100],
+                    "confidence": 0.85,
+                })
+            if not any(d for d in deliverables if "HMAC" in d):
+                deliverables.append("Cryptographic HMAC SHA-256 signature verification")
+                tagged_requirements.append({
+                    "title": "HMAC SHA-256 Verification",
+                    "description": "Cryptographic HMAC SHA-256 signature verification",
+                    "certainty": "INFERRED",
+                    "source_message_id": source_message_id,
+                    "source_text_reference": None,
+                    "confidence": 0.85,
+                })
             deliverables.append("Sandbox integration test verifying valid and rejected signatures")
             tagged_requirements.append({
                 "title": "Sandbox Verification Suite",
                 "description": "Sandbox integration test verifying valid and rejected signatures",
                 "certainty": "ASSUMED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.70,
             })
         elif proj_type == "INTEGRATION":
-            deliverables.append("Async Python httpx client with connection pooling and retries")
-            tagged_requirements.append({
-                "title": "Async REST Client",
-                "description": "Async Python httpx client with connection pooling and retries",
-                "certainty": "CLIENT_STATED",
-            })
+            if not any(d for d in deliverables if "httpx" in d):
+                deliverables.append("Async Python httpx client with connection pooling and retries")
+                tagged_requirements.append({
+                    "title": "Async REST Client",
+                    "description": "Async Python httpx client with connection pooling and retries",
+                    "certainty": "INFERRED",
+                    "source_message_id": source_message_id,
+                    "source_text_reference": client_text[:100],
+                    "confidence": 0.85,
+                })
             deliverables.append("Authentication header injection and token refresh logic")
             tagged_requirements.append({
                 "title": "Auth Header Injection",
                 "description": "Authentication header injection and token refresh logic",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.85,
             })
             deliverables.append("Comprehensive error handling and status code mapping")
             tagged_requirements.append({
                 "title": "Error Handling & Status Mapping",
                 "description": "Comprehensive error handling and status code mapping",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.80,
             })
         elif proj_type == "FRONTEND":
             deliverables.append("Clean semantic HTML5 / Tailwind responsive page")
@@ -150,18 +249,27 @@ class RequirementsExtractor:
                 "title": "Semantic HTML5 Page",
                 "description": "Clean semantic HTML5 / Tailwind responsive page",
                 "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": client_text[:100],
+                "confidence": 1.0,
             })
             deliverables.append("Mobile-first viewport layout with conversion CTA")
             tagged_requirements.append({
                 "title": "Mobile Viewport Layout",
                 "description": "Mobile-first viewport layout with conversion CTA",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.85,
             })
             deliverables.append("Zero placeholder markers or broken assets")
             tagged_requirements.append({
                 "title": "Asset Integrity",
                 "description": "Zero placeholder markers or broken assets",
                 "certainty": "ASSUMED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.70,
             })
         elif proj_type == "DASHBOARD":
             deliverables.append("Interactive dashboard layout JSON specification")
@@ -169,12 +277,18 @@ class RequirementsExtractor:
                 "title": "Dashboard Specification",
                 "description": "Interactive dashboard layout JSON specification",
                 "certainty": "CLIENT_STATED",
+                "source_message_id": source_message_id,
+                "source_text_reference": client_text[:100],
+                "confidence": 1.0,
             })
             deliverables.append("Metric widget configurations and refresh schedules")
             tagged_requirements.append({
                 "title": "Metric Widgets",
                 "description": "Metric widget configurations and refresh schedules",
                 "certainty": "INFERRED",
+                "source_message_id": source_message_id,
+                "source_text_reference": None,
+                "confidence": 0.85,
             })
 
         # 3. Define Acceptance Criteria
@@ -202,7 +316,7 @@ class RequirementsExtractor:
                 "description": "Missing target API documentation URL and authentication credentials",
                 "certainty": "UNKNOWN",
             })
-        if proj_type == "WEBHOOK" and "secret" not in text_lower:
+        if proj_type == "WEBHOOK" and not any(k in text_lower for k in ["secret", "hmac", "signature", "token"]):
             unknowns.append("Webhook provider signature header name and hashing algorithm")
             tagged_requirements.append({
                 "title": "Webhook Secret Specification",
@@ -373,16 +487,24 @@ class BoundedNegotiationEngine:
             )
             session.add(quote)
 
-            # Persist individual requirements with certainty
+            # Persist individual requirements with certainty and provenance
             for idx, req_item in enumerate(requirements):
                 if isinstance(req_item, dict):
                     title = req_item.get("title", f"Requirement {idx + 1}")
                     desc = req_item.get("description", str(req_item))
                     certainty = req_item.get("certainty", "CLIENT_STATED")
+                    src_msg_id = req_item.get("source_message_id")
+                    src_text_ref = req_item.get("source_text_reference")
+                    conf = float(req_item.get("confidence", 1.0))
+                    crit = req_item.get("acceptance_criteria") or [f"Verified: {desc}"]
                 else:
                     title = f"Requirement {idx + 1}"
                     desc = str(req_item)
                     certainty = "CLIENT_STATED"
+                    src_msg_id = None
+                    src_text_ref = None
+                    conf = 1.0
+                    crit = [f"Verified: {desc}"]
 
                 req_row = Requirement(
                     project_id=project_id,
@@ -390,7 +512,10 @@ class BoundedNegotiationEngine:
                     description=desc,
                     priority="HIGH",
                     certainty=certainty,
-                    acceptance_criteria=[f"Verified: {desc}"],
+                    source_message_id=src_msg_id,
+                    source_text_reference=src_text_ref,
+                    confidence=conf,
+                    acceptance_criteria=crit,
                     status="PENDING",
                 )
                 session.add(req_row)

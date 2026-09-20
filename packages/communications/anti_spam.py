@@ -58,9 +58,13 @@ class AntiSpamEngine:
                         return False, "Communication rejected: Prospect has opted out / unsubscribed"
 
                     if prospect.last_contacted_at:
+                        last_c = prospect.last_contacted_at
+                        if last_c.tzinfo is None:
+                            last_c = last_c.replace(tzinfo=timezone.utc)
                         cooldown_cutoff = datetime.now(timezone.utc) - timedelta(days=self.cooldown_days)
-                        if prospect.last_contacted_at > cooldown_cutoff:
-                            days_left = (prospect.last_contacted_at - cooldown_cutoff).days
+                        # Cooldown applies to unsolicited cold outreach, not active conversation replies
+                        if not req.conversation_id and last_c > cooldown_cutoff:
+                            days_left = (last_c - cooldown_cutoff).days
                             return False, f"Communication rejected: Cooldown active ({days_left} days remaining)"
 
             # Check individual contact opt-out

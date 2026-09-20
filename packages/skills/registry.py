@@ -1,4 +1,4 @@
-﻿"""Central Skill Registry Service.
+"""Central Skill Registry Service.
 Handles registration, semantic version resolution, validation, publication, immutability,
 and lifecycle state transitions for all agent skills.
 """
@@ -281,6 +281,24 @@ class SkillRegistry:
             )
             return (await session.execute(stmt)).scalar_one_or_none()
 
+    async def seed_starter_skills(self, actor: str = "SYSTEM_SEED") -> int:
+        """Seeds and publishes canonical starter skills from the catalog if not present."""
+        from packages.skills.catalog import get_starter_skills
+        starters = get_starter_skills()
+        seeded = 0
+        for payload in starters:
+            try:
+                existing = await self.get_skill_version(payload.skill_id, payload.version)
+                if not existing:
+                    await self.register_skill(payload, actor=actor)
+                    await self.publish_skill(payload.skill_id, payload.version, actor=actor)
+                    seeded += 1
+                elif existing.status != SkillStatus.PUBLISHED:
+                    await self.publish_skill(payload.skill_id, payload.version, actor=actor)
+            except Exception as ex:
+                logger.warning(f"Error seeding starter skill '{payload.skill_id}' v{payload.version}: {ex}")
+        return seeded
+
     async def resolve_compatible_skill(
         self,
         skill_id: str,
@@ -295,6 +313,12 @@ class SkillRegistry:
                     SkillDefinition.version == requested_version,
                 )
                 skill = (await session.execute(stmt)).scalar_one_or_none()
+                if not skill:
+                    from packages.skills.catalog import get_starter_skills
+                    if any(s.skill_id == skill_id for s in get_starter_skills()):
+                        await self.seed_starter_skills()
+                        skill = (await session.execute(stmt)).scalar_one_or_none()
+
                 if not skill:
                     raise SkillNotFoundError(f"Skill '{skill_id}' version '{requested_version}' not found")
                 
@@ -312,6 +336,12 @@ class SkillRegistry:
                 SkillDefinition.status == SkillStatus.PUBLISHED,
             )
             skills = (await session.execute(stmt)).scalars().all()
+            if not skills:
+                from packages.skills.catalog import get_starter_skills
+                if any(s.skill_id == skill_id for s in get_starter_skills()):
+                    await self.seed_starter_skills()
+                    skills = (await session.execute(stmt)).scalars().all()
+
             if not skills:
                 raise SkillNotFoundError(f"No active PUBLISHED versions found for skill '{skill_id}'")
 

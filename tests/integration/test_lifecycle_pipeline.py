@@ -57,12 +57,24 @@ async def test_decoupled_autonomous_business_lifecycle(monkeypatch):
     monkeypatch.setattr(dodo_provider, "webhook_secret", test_secret)
 
     # -------------------------------------------------------------------------
-    # PHASE 1: COMMERCIAL INTAKE (Stops at CHECKOUT_CREATED / PAYMENT_PENDING)
+    # PHASE 1A: COMMERCIAL DISCOVERY & OUTREACH (Stops at OUTREACH_DISPATCHED)
     # -------------------------------------------------------------------------
-    intake = await autonomous_engine.start_commercial_intake(
+    outreach = await autonomous_engine.start_commercial_intake(
         business_name=f"Apex Logistics {uid}",
         domain=f"apexlogistics_{uid}.io",
         lead_email=f"ops_{uid}@apexlogistics.io",
+    )
+
+    assert outreach["status"] == "OUTREACH_DISPATCHED"
+    assert outreach["qualification_score"] >= 0.5
+    assert outreach["prospect_id"] is not None
+
+    # -------------------------------------------------------------------------
+    # PHASE 1B: INBOUND CLIENT RESPONSE (Conversation Reasoning -> Quote -> Checkout)
+    # -------------------------------------------------------------------------
+    intake = await autonomous_engine.process_inbound_commercial_response(
+        sender=f"ops_{uid}@apexlogistics.io",
+        content="Need a serverless webhook receiver with HMAC signature verification in FastAPI with POST endpoint and payload schema",
     )
 
     assert intake["status"] == "CHECKOUT_CREATED"
