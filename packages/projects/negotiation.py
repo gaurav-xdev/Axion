@@ -329,7 +329,20 @@ class RequirementsExtractor:
         if "and" in text_lower or "," in text_lower:
             integrations = min(4, 1 + text_lower.count("and") + text_lower.count(","))
         base_effort = 4.0 if proj_type in ("AUTOMATION", "WEBHOOK", "FRONTEND") else 6.0
-        effort = base_effort + (integrations - 1) * 2.5
+        raw_effort = base_effort + (integrations - 1) * 2.5
+
+        # Calibrate effort dynamically using institutional memory
+        from packages.memory.context import memory_manager
+        skill_name_map = {
+            "AUTOMATION": "build_n8n_automation",
+            "WEBHOOK": "build_webhook_integration",
+            "INTEGRATION": "build_api_integration",
+            "FRONTEND": "build_landing_page",
+            "DASHBOARD": "build_business_dashboard",
+        }
+        target_skill = skill_name_map.get(proj_type)
+        calibration = memory_manager.get_calibration_multiplier(target_skill)
+        effort = round(raw_effort * calibration, 1)
 
         ready = len(unknowns) == 0
 

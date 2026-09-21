@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import func, select
 
 from packages.agent.dispatcher import task_dispatcher
+from packages.agent.manager import autonomous_business_manager
 from packages.observability.logger import logger
 from packages.observability.metrics import AGENT_RUNS_TOTAL
 from packages.security.emergency import emergency_service
@@ -198,7 +199,15 @@ class AutonomousSchedulerService:
                     f"Gap: ${rev_metrics['remaining_gap']:.2f}"
                 )
 
-                # 2. Pipeline check & task dispatch
+                # 2. Run Autonomous Business Manager control cycle
+                control_cycle_res = await autonomous_business_manager.run_control_cycle()
+                if control_cycle_res.get("decisions_count", 0) > 0:
+                    logger.info(
+                        f"[Manager Cycle] Executed {control_cycle_res['decisions_count']} decisions: "
+                        f"{[r['action'] for r in control_cycle_res.get('executed_results', [])]}"
+                    )
+
+                # 3. Pipeline check & task dispatch
                 dispatched = await self.check_pipeline_and_dispatch()
                 if any(dispatched.values()):
                     logger.info(f"[Scheduler Cycle] Dispatched tasks: {dispatched}")

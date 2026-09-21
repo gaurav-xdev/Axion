@@ -118,6 +118,7 @@ class OutcomeLearningEngine:
             )
 
             # Update SkillMetrics in database for skills run in this project
+            from packages.memory.context import memory_manager
             for task in tasks:
                 if task.worker_type == "skill" and task.input_payload and "skill_id" in task.input_payload:
                     s_id = task.input_payload["skill_id"]
@@ -130,6 +131,39 @@ class OutcomeLearningEngine:
                         else:
                             sm.failure_count += 1
                         sm.updated_at = utc_now()
+
+                    # Record in Skill Memory
+                    memory_manager.record_skill_execution(
+                        skill_id=s_id,
+                        success=(task.status == TaskStatus.PASSED),
+                        duration_seconds=actual_duration_hours * 3600.0 / max(1, len(tasks)),
+                        cost_usd=internal_cost / max(1, len(tasks)),
+                    )
+
+            # Record failure lessons in Memory if defects were found
+            for finding in findings:
+                memory_manager.record_failure_lesson(
+                    failure_type="QA_DEFECT",
+                    root_cause=finding.description,
+                    context_keywords=[project.name] + [s_id for t in tasks if t.input_payload for s_id in [t.input_payload.get("skill_id")] if s_id],
+                    prevention_rule=finding.remediation or f"Address defect: {finding.description}",
+                    solution_verified=True,
+                )
+
+            # Update Client Memory
+            if project.client_id:
+                memory_manager.update_client_memory(
+                    client_id=project.client_id,
+                    payment_amount=revenue,
+                )
+
+            # Record Episodic Event
+            memory_manager.record_episodic_event(
+                event_type="PROJECT_COMPLETED",
+                entity_id=project_id,
+                description=f"Project '{project.name}' completed with revenue ${revenue:,.2f} and margin {profit_margin * 100:.0f}%",
+                evidence={"calibration_ratio": calibration_ratio, "tasks_passed": len(passed_tasks), "profit_margin": profit_margin},
+            )
 
             # Mark project completed if delivered
             if project.status == ProjectStatus.DELIVERED:

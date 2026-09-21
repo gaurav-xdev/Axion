@@ -83,9 +83,12 @@ class ProspectingEngine:
         return min(round(score, 2), 1.0)
 
     async def ingest_prospect(self, data: ProspectData) -> Prospect:
-        """Atomically checks for duplicate domains, scores, and persists prospect."""
+        """Atomically checks for duplicate domains, calculates economic value, and persists prospect."""
         domain = normalize_domain(data.website)
         score = self.calculate_qualification_score(data)
+
+        from packages.projects.economic_model import economic_evaluator
+        econ_val = economic_evaluator.evaluate_prospect(data)
 
         async with async_session_factory() as session:
             # Deduplication check
@@ -94,8 +97,10 @@ class ProspectingEngine:
             existing = result.scalar_one_or_none()
 
             if existing:
-                logger.info(f"Prospect with domain '{domain}' already exists. Updating score.")
+                logger.info(f"Prospect with domain '{domain}' already exists. Updating score & valuation.")
                 existing.qualification_score = max(existing.qualification_score, score)
+                if isinstance(existing.evidence_sources, dict):
+                    existing.evidence_sources["economic_valuation"] = econ_val.model_dump(mode="json")
                 existing.updated_at = datetime.now(timezone.utc)
                 await session.commit()
                 await session.refresh(existing)
@@ -109,7 +114,7 @@ class ProspectingEngine:
                 domain=domain,
                 industry=data.industry,
                 qualification_score=score,
-                status="QUALIFIED" if score >= 0.6 else "DISCOVERED",
+                status="QUALIFIED" if score >= 0.6 or econ_val.qualification_recommendation in ("PRIORITY_TARGET", "QUALIFIED") else "DISCOVERED",
                 pain_points={
                     "points": data.observed_pain_points,
                     "observations": observations_data,
@@ -118,6 +123,7 @@ class ProspectingEngine:
                     "urls": data.evidence_urls,
                     "discovered_at": datetime.now(timezone.utc).isoformat(),
                     "observations_count": len(observations_data),
+                    "economic_valuation": econ_val.model_dump(mode="json"),
                 },
             )
             session.add(new_prospect)
@@ -135,7 +141,10 @@ class ProspectingEngine:
 
             await session.commit()
             await session.refresh(new_prospect)
-            logger.info(f"Created prospect '{new_prospect.business_name}' with score {score}")
+            logger.info(
+                f"Created prospect '{new_prospect.business_name}' with score {score} "
+                f"(EV: ${econ_val.expected_economic_value:.2f}/hr, Rec: {econ_val.qualification_recommendation})"
+            )
             return new_prospect
 
     async def discover_and_qualify_target(
