@@ -127,9 +127,7 @@ class ProjectPlanningEngine:
                 client_domain = None
                 if client_obj and client_obj.email and "@" in client_obj.email:
                     client_domain = client_obj.email.split("@")[-1].strip().lower()
-                clean_name = re.sub(r"[^a-zA-Z0-9]", "", project.name.lower())
-                domain_to_use = client_domain or f"{clean_name}.com"
-                resolved_base_url = f"https://api.{domain_to_use}"
+                resolved_base_url = None
 
             # MILESTONES: Engineering Deliverable tasks for each resolved skill
             prev_task_id: Optional[str] = None
@@ -148,8 +146,8 @@ class ProjectPlanningEngine:
                     "secret_env_var": "WEBHOOK_SECRET",
                     "target_api_name": f"{project.name.replace(' ', '')}Client",
                     "base_url": resolved_base_url,
-                    "crm_api_url": f"{resolved_base_url}/v1/leads",
-                    "domain": project.name.lower().replace(" ", "") + ".com",
+                    "crm_api_url": f"{resolved_base_url}/v1/leads" if resolved_base_url else None,
+                    "domain": client_domain,
                     "headline": project.name,
                     "cta_text": "Get Started",
                     "dashboard_title": project.name,

@@ -28,6 +28,17 @@ class EconomicFactors(BaseModel):
     competition_discount: float = Field(ge=0.0, le=1.0, description="Discount factor for competitive density [0=monopoly, 1=saturated]")
 
 
+class FactorProvenance(BaseModel):
+    identity_provenance: str = "UNKNOWN"
+    contact_provenance: str = "UNKNOWN"
+    problem_evidence_provenance: str = "UNKNOWN"
+    service_fit_provenance: str = "UNKNOWN"
+    budget_provenance: str = "DEFAULT_PRIOR"
+    policy_risk_provenance: str = "DEFAULT_PRIOR"
+    competition_provenance: str = "DEFAULT_PRIOR"
+    delivery_provenance: str = "DEFAULT_PRIOR"
+
+
 class EconomicValuation(BaseModel):
     prospect_domain: str
     expected_project_value_usd: float
@@ -38,6 +49,7 @@ class EconomicValuation(BaseModel):
     estimated_acquisition_effort_hours: float
     expected_economic_value: float
     factors: EconomicFactors
+    provenance: FactorProvenance = Field(default_factory=FactorProvenance)
     qualification_recommendation: str  # "PRIORITY_TARGET", "QUALIFIED", "DEFERRED", "REJECTED"
     rationale: str
     evaluated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -49,7 +61,7 @@ class OpportunityEconomicEvaluator:
     def evaluate_prospect(
         self,
         prospect: ProspectData,
-        historical_delivery_rate: float = 0.95,
+        historical_delivery_rate: Optional[float] = None,
         target_hourly_rate_usd: float = 125.0,
     ) -> EconomicValuation:
         # 1. Identity Confidence
@@ -160,6 +172,53 @@ class OpportunityEconomicEvaluator:
         # Acquisition effort: outreach preparation + conversational requirements + proposal (1.0 - 2.5 hours)
         acquisition_effort_hours = 1.0 if factors.contact_confidence >= 0.8 else 2.0
 
+        # Provenance Tracking
+        identity_prov = "FACT_VERIFIED" if (prospect.website and "." in prospect.website and prospect.business_name) else "UNKNOWN"
+        if prospect.contact_email and prospect.website and prospect.contact_email.split("@")[-1] in prospect.website:
+            contact_prov = "FACT_DIRECT_MATCH"
+        elif prospect.contact_email or prospect.contact_name:
+            contact_prov = "INFERRED_CONTACT"
+        else:
+            contact_prov = "UNKNOWN"
+
+        if fact_count > 0:
+            problem_prov = "FACT_OBSERVED"
+        elif inference_count > 0 or prospect.observed_pain_points:
+            problem_prov = "INFERRED"
+        else:
+            problem_prov = "UNKNOWN"
+
+        service_fit_prov = "DIRECT_KEYWORD_MATCH" if len(matched_keywords) > 0 else "DEFAULT_PRIOR"
+        budget_prov = "INFERRED_INDUSTRY" if any(ind in prospect.industry.lower() or ind in combined_text for ind in high_budget_indicators) else "DEFAULT_PRIOR"
+
+        delivery_prov = "DEFAULT_PRIOR"
+        if historical_delivery_rate is None:
+            try:
+                from packages.memory.context import memory_manager
+                skill_perf = memory_manager.get_skill_performance("build_n8n_automation")
+                if skill_perf and skill_perf.total_executions > 0:
+                    historical_delivery_rate = skill_perf.success_rate
+                    delivery_prov = "MEASURED_EMPIRICAL"
+                else:
+                    historical_delivery_rate = 0.95
+                    delivery_prov = "DEFAULT_PRIOR"
+            except Exception:
+                historical_delivery_rate = 0.95
+                delivery_prov = "DEFAULT_PRIOR"
+        else:
+            delivery_prov = "USER_SPECIFIED"
+
+        provenance = FactorProvenance(
+            identity_provenance=identity_prov,
+            contact_provenance=contact_prov,
+            problem_evidence_provenance=problem_prov,
+            service_fit_provenance=service_fit_prov,
+            budget_provenance=budget_prov,
+            policy_risk_provenance="DEFAULT_PRIOR",
+            competition_provenance="DEFAULT_PRIOR",
+            delivery_provenance=delivery_prov,
+        )
+
         p_delivery = max(0.5, min(1.0, historical_delivery_rate))
 
         # 9. Expected Economic Value (Net EV per acquisition effort hour)
@@ -188,12 +247,12 @@ class OpportunityEconomicEvaluator:
         else:
             recommendation = "DEFERRED"
             rationale = (
-                f"Low expected return (${expected_economic_value:.2f}/effort-hr). "
-                "Recommend deeper signal gathering or prioritizing higher-yield targets."
+                f"Low expected economic return (${expected_economic_value:.2f}/effort-hr). "
+                f"Defer until stronger signal or direct inbound response."
             )
 
         return EconomicValuation(
-            prospect_domain=prospect.website or "unknown_domain",
+            prospect_domain=prospect.website or prospect.business_name,
             expected_project_value_usd=expected_value_usd,
             expected_internal_cost_usd=expected_cost_usd,
             expected_margin=expected_margin,
@@ -202,6 +261,7 @@ class OpportunityEconomicEvaluator:
             estimated_acquisition_effort_hours=acquisition_effort_hours,
             expected_economic_value=expected_economic_value,
             factors=factors,
+            provenance=provenance,
             qualification_recommendation=recommendation,
             rationale=rationale,
         )

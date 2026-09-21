@@ -30,6 +30,7 @@ from packages.shared.models import (
     ProjectStatus,
     ProjectTask,
     Prospect,
+    Requirement,
     TaskStatus,
 )
 
@@ -111,13 +112,21 @@ class AutonomousSchedulerService:
                 task_id = f"task_exec_{proj.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
                 from packages.agent.dispatcher import DispatchTaskMessage
 
+                req_stmt = select(Requirement).where(Requirement.project_id == proj.id)
+                proj_reqs = (await session.execute(req_stmt)).scalars().all()
+                import re
+                stated_api_url = None
+                for r in proj_reqs:
+                    m = re.search(r"https?://[^\s'\"]+", f"{r.title} {r.description}")
+                    if m:
+                        stated_api_url = m.group(0)
+                        break
+
                 client_stmt = select(Client).where(Client.id == proj.client_id)
                 client_obj = (await session.execute(client_stmt)).scalar_one_or_none()
                 client_domain = None
                 if client_obj and client_obj.email and "@" in client_obj.email:
                     client_domain = client_obj.email.split("@")[-1].strip().lower()
-                clean_name = "".join(c for c in proj.name.lower() if c.isalnum())
-                safe_domain = client_domain or f"{clean_name}.com"
 
                 task_msg = DispatchTaskMessage(
                     task_id=task_id,
@@ -127,8 +136,8 @@ class AutonomousSchedulerService:
                     payload={
                         "workflow_name": proj.name,
                         "webhook_path": f"/webhook/{proj.id[:8]}",
-                        "crm_api_url": f"https://api.{safe_domain}/v1/leads",
-                        "domain": safe_domain,
+                        "crm_api_url": stated_api_url,
+                        "domain": client_domain,
                     },
                     idempotency_key=f"idemp_exec_{proj.id}_{task_id}",
                     timeout_seconds=120,
@@ -164,21 +173,56 @@ class AutonomousSchedulerService:
                     contact_stmt = select(Contact).where(Contact.prospect_id == q_p.id)
                     contact = (await session.execute(contact_stmt)).scalars().first()
                     if contact and contact.email and not contact.opt_out and not q_p.opt_out:
-                        from packages.communications.base import OutboundMessageRequest
-                        from packages.communications.gateway import communication_gateway
-                        outreach_req = OutboundMessageRequest(
-                            recipient=contact.email,
-                            sender=settings.SMTP_FROM_EMAIL,
-                            channel="EMAIL",
-                            subject=f"Workflow Automation: {q_p.business_name}",
-                            content=f"Hello {contact.name or 'there'},\n\nWe identified potential workflow automation efficiencies for {q_p.business_name}.\n\nBest regards,\nAxion Team",
-                            prospect_id=q_p.id,
+                        pain_summary = []
+                        if isinstance(q_p.pain_points, dict):
+                            pts = q_p.pain_points.get("points", [])
+                            obs_list = q_p.pain_points.get("observations", [])
+                            if pts:
+                                pain_summary.extend(pts)
+                            for ob in obs_list:
+                                if isinstance(ob, dict) and ob.get("statement"):
+                                    pain_summary.append(ob["statement"])
+                                elif hasattr(ob, "statement"):
+                                    pain_summary.append(ob.statement)
+
+                        target_name = contact.name or q_p.business_name
+                        if pain_summary:
+                            evidence_focus = f"Specifically, we observed integration requirements regarding: {pain_summary[0]}."
+                        else:
+                            evidence_focus = f"We analyzed the {q_p.industry or 'operational'} workflow infrastructure for {q_p.business_name}."
+
+                        personalized_content = (
+                            f"Hello {target_name},\n\n"
+                            f"{evidence_focus}\n\n"
+                            f"We engineer and deploy fixed-price autonomous backend workflows and API integrations, "
+                            f"backed by 5-layer adversarial QA and delivered with full cryptographic test manifests.\n\n"
+                            f"Would you be open to reviewing a scope and fixed quote for {q_p.business_name}?\n\n"
+                            f"Best regards,\nAxion Autonomous Engineering"
                         )
-                        await communication_gateway.dispatch(outreach_req)
-                        q_p.status = "CONTACTED"
-                        q_p.last_contacted_at = datetime.now(timezone.utc)
-                        dispatched_counts["outreach"] += 1
-                        logger.info(f"Scheduler dispatched outreach communication to {contact.email} for prospect {q_p.id}")
+
+                        from packages.tools.base import ToolRequest
+                        from packages.tools.gateway import tool_gateway
+
+                        tool_req = ToolRequest(
+                            tool_name="communication.dispatch",
+                            arguments={
+                                "recipient": contact.email,
+                                "sender": settings.SMTP_FROM_EMAIL,
+                                "subject": f"Technical workflow integration: {q_p.business_name}",
+                                "content": personalized_content,
+                                "channel": "EMAIL",
+                                "prospect_id": q_p.id,
+                            },
+                            requested_by_role="OPERATOR",
+                            client_id=q_p.id,
+                            idempotency_key=f"sched_outreach_{q_p.id}_{int(datetime.now(timezone.utc).timestamp())}",
+                        )
+                        tool_res = await tool_gateway.execute(tool_req)
+                        if tool_res.success:
+                            q_p.status = "CONTACTED"
+                            q_p.last_contacted_at = datetime.now(timezone.utc)
+                            dispatched_counts["outreach"] += 1
+                            logger.info(f"Scheduler dispatched outreach communication to {contact.email} for prospect {q_p.id} via ToolGateway")
 
             await session.commit()
 

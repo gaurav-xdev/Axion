@@ -204,6 +204,18 @@ class ToolGateway:
                 exec_time_ms=exec_time,
                 success=True,
             )
+            if is_side_effecting:
+                await self._record_audit_event(
+                    actor=request.requested_by_role,
+                    action=f"tool_execute:{tool.name}",
+                    target_type="tool",
+                    target_id=tool.name,
+                    project_id=request.project_id,
+                    client_id=request.client_id,
+                    risk_level=tool.risk_level,
+                    result="SUCCESS",
+                    reason=f"Executed {tool.name} with risk level {tool.risk_level.value}",
+                )
 
             # Generate evidence snapshot
             evidence = {

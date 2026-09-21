@@ -263,54 +263,22 @@ class QAWorker:
 
     async def execute_sandbox_test(self, test_file_path: Path, timeout_seconds: float = 20.0) -> Tuple[bool, str]:
         """Executes a test file in an isolated Python subprocess without polluting the host or leaking secrets."""
-        import os
         import sys
-        import asyncio
         if not test_file_path.exists():
             return False, f"Test file '{test_file_path}' does not exist"
 
-        # Sanitize environment: strip all API keys, secrets, and credentials
-        sensitive_keys = {
-            "DODO_API_KEY", "DODO_WEBHOOK_SECRET", "APP_SECRET", "JWT_SECRET",
-            "NIM_API_KEY", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "SMTP_PASSWORD",
-            "TWILIO_AUTH_TOKEN", "WHATSAPP_ACCESS_TOKEN", "AWS_SECRET_ACCESS_KEY",
-        }
-        sanitized_env = {
-            k: v for k, v in os.environ.items()
-            if k not in sensitive_keys
-            and not k.endswith("_SECRET")
-            and not k.endswith("_KEY")
-            and not k.endswith("_PASSWORD")
-        }
-        sanitized_env["PYTHONPATH"] = str(test_file_path.parent)
-
+        from packages.security.sandbox import sandbox_executor
         cmd = [sys.executable, "-m", "pytest", str(test_file_path), "-v"]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(test_file_path.parent),
-                env=sanitized_env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-            stdout = stdout_bytes.decode("utf-8", errors="replace")
-            stderr = stderr_bytes.decode("utf-8", errors="replace")
-
-            if proc.returncode == 0:
-                return True, stdout
-            else:
-                return False, stderr or stdout
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return False, f"Test execution timed out after {timeout_seconds}s"
-        except Exception as e:
-            return False, f"Failed spawning test subprocess: {e}"
+        res = await sandbox_executor.run_async_command(
+            cmd,
+            cwd=test_file_path.parent,
+            timeout_seconds=timeout_seconds,
+            additional_env={"PYTHONPATH": str(test_file_path.parent)},
+        )
+        if res.success:
+            return True, res.stdout
+        else:
+            return False, res.stderr or res.stdout
 
 
 # Global singleton

@@ -169,42 +169,16 @@ class SoftwareEngineeringAgent:
                 duration_ms=0,
             )
 
-        start = time.monotonic()
-        try:
-            cmd = [sys.executable, "-m", "pytest", str(test_path), "-v"]
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                cwd=str(test_path.parent),
-            )
-            dur = int((time.monotonic() - start) * 1000)
-            return TestExecutionReport(
-                test_target=test_file_rel,
-                passed=(res.returncode == 0),
-                returncode=res.returncode,
-                output=res.stdout + "\n" + res.stderr,
-                duration_ms=dur,
-            )
-        except subprocess.TimeoutExpired:
-            dur = int((time.monotonic() - start) * 1000)
-            return TestExecutionReport(
-                test_target=test_file_rel,
-                passed=False,
-                returncode=-2,
-                output=f"Execution timed out after {timeout_seconds}s",
-                duration_ms=dur,
-            )
-        except Exception as ex:
-            dur = int((time.monotonic() - start) * 1000)
-            return TestExecutionReport(
-                test_target=test_file_rel,
-                passed=False,
-                returncode=-3,
-                output=f"Subprocess execution error: {ex}",
-                duration_ms=dur,
-            )
+        cmd = [sys.executable, "-m", "pytest", str(test_path), "-v"]
+        from packages.security.sandbox import sandbox_executor
+        res = sandbox_executor.run_sync_command(cmd, cwd=test_path.parent, timeout_seconds=timeout_seconds)
+        return TestExecutionReport(
+            test_target=test_file_rel,
+            passed=res.success,
+            returncode=res.returncode,
+            output=res.stdout + ("\n" + res.stderr if res.stderr else ""),
+            duration_ms=res.duration_ms,
+        )
 
     def self_heal_syntax_defect(self, project_id: str, relative_path: str, error_msg: str) -> bool:
         """Applies deterministic syntax remediation heuristics for common agent mistakes."""

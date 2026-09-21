@@ -15,7 +15,7 @@ import pytest
 
 from packages.agent.lifecycle import autonomous_engine
 from packages.payments.base import CheckoutResponse
-from packages.payments.dodo import dodo_provider
+from packages.payments.dodo import DodoPaymentsProvider, dodo_provider
 from packages.payments.verification import payment_verification_service
 from packages.shared.config import settings
 from packages.shared.database import async_session_factory, init_db
@@ -41,7 +41,7 @@ async def test_decoupled_autonomous_business_lifecycle(monkeypatch):
     uid = str(uuid.uuid4())[:8]
 
     # Configure mocked Dodo provider for checkout session generation
-    async def mock_create_checkout(req):
+    async def mock_create_checkout(self, req):
         return CheckoutResponse(
             checkout_id=f"chk_pipe_{req.project_id[:8]}",
             checkout_url=f"https://test.dodopayments.com/checkout/chk_pipe_{req.project_id[:8]}",
@@ -51,7 +51,7 @@ async def test_decoupled_autonomous_business_lifecycle(monkeypatch):
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
 
-    monkeypatch.setattr(dodo_provider, "create_checkout", mock_create_checkout)
+    monkeypatch.setattr(DodoPaymentsProvider, "create_checkout", mock_create_checkout)
     test_secret = "test_webhook_secret_key_12345"
     monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", test_secret)
     monkeypatch.setattr(dodo_provider, "webhook_secret", test_secret)

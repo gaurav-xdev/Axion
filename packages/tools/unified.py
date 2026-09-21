@@ -80,16 +80,19 @@ class PaymentCreateCheckoutTool(BaseTool):
     input_schema = PaymentCreateCheckoutInput
     required_permission = "payments:write"
 
-    def __init__(self):
-        self._provider = None
+    def __init__(self, provider=None):
+        self._provider = provider
+
+    @property
+    def provider(self):
+        if self._provider is not None:
+            return self._provider
+        from packages.payments.dodo import dodo_provider
+        return dodo_provider
 
     async def execute(self, params: PaymentCreateCheckoutInput, context: ToolRequest) -> Dict[str, Any]:
         if not context.project_id:
             raise ValueError("Payment checkout generation requires an authoritative project_id context")
-
-        if self._provider is None:
-            from packages.payments.dodo import DodoPaymentsProvider
-            self._provider = DodoPaymentsProvider()
 
         from packages.payments.base import CreateCheckoutRequest
         req = CreateCheckoutRequest(
@@ -102,7 +105,7 @@ class PaymentCreateCheckoutTool(BaseTool):
             customer_email=params.customer_email,
             customer_name=params.customer_name,
         )
-        res = await self._provider.create_checkout(req)
+        res = await self.provider.create_checkout(req)
         return {
             "checkout_id": res.checkout_id,
             "checkout_url": res.checkout_url,

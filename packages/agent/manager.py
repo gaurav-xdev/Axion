@@ -306,21 +306,59 @@ class AutonomousBusinessManager:
                     contact_stmt = select(Contact).where(Contact.prospect_id == decision.target_entity_id)
                     contact = (await session.execute(contact_stmt)).scalars().first()
                     if pr and contact and contact.email and not contact.opt_out and not pr.opt_out:
-                        from packages.communications.base import OutboundMessageRequest
-                        from packages.communications.gateway import communication_gateway
-                        req = OutboundMessageRequest(
-                            recipient=contact.email,
-                            sender=settings.SMTP_FROM_EMAIL,
-                            channel="EMAIL",
-                            subject=f"Workflow Optimization: {pr.business_name}",
-                            content=f"Hello {contact.name or 'there'},\n\nWe identified operational automation opportunities for {pr.business_name}.\n\nBest regards,\nAxion Team",
-                            prospect_id=pr.id,
+                        # Build evidence-derived personalized outreach
+                        pain_summary = []
+                        if isinstance(pr.pain_points, dict):
+                            pts = pr.pain_points.get("points", [])
+                            obs_list = pr.pain_points.get("observations", [])
+                            if pts:
+                                pain_summary.extend(pts)
+                            for ob in obs_list:
+                                if isinstance(ob, dict) and ob.get("statement"):
+                                    pain_summary.append(ob["statement"])
+                                elif hasattr(ob, "statement"):
+                                    pain_summary.append(ob.statement)
+
+                        target_name = contact.name or pr.business_name
+                        if pain_summary:
+                            evidence_focus = f"Specifically, we observed integration requirements regarding: {pain_summary[0]}."
+                        else:
+                            evidence_focus = f"We analyzed the {pr.industry or 'operational'} workflow infrastructure for {pr.business_name}."
+
+                        personalized_content = (
+                            f"Hello {target_name},\n\n"
+                            f"{evidence_focus}\n\n"
+                            f"We engineer and deploy fixed-price autonomous backend workflows and API integrations, "
+                            f"backed by 5-layer adversarial QA and delivered with full cryptographic test manifests.\n\n"
+                            f"Would you be open to reviewing a scope and fixed quote for {pr.business_name}?\n\n"
+                            f"Best regards,\nAxion Autonomous Engineering"
                         )
-                        res = await communication_gateway.dispatch(req)
-                        pr.status = "CONTACTED"
-                        pr.last_contacted_at = datetime.now(timezone.utc)
-                        await session.commit()
-                        return {"status": "OUTREACH_SENT", "message_id": res.message_id}
+
+                        from packages.tools.base import ToolRequest
+                        from packages.tools.gateway import tool_gateway
+
+                        tool_req = ToolRequest(
+                            tool_name="communication.dispatch",
+                            arguments={
+                                "recipient": contact.email,
+                                "sender": settings.SMTP_FROM_EMAIL,
+                                "subject": f"Technical workflow integration: {pr.business_name}",
+                                "content": personalized_content,
+                                "channel": "EMAIL",
+                                "prospect_id": pr.id,
+                            },
+                            requested_by_role="OPERATOR",
+                            client_id=pr.id,
+                            idempotency_key=f"mgr_outreach_{pr.id}_{int(datetime.now(timezone.utc).timestamp())}",
+                        )
+                        tool_res = await tool_gateway.execute(tool_req)
+                        if tool_res.success:
+                            pr.status = "CONTACTED"
+                            pr.last_contacted_at = datetime.now(timezone.utc)
+                            await session.commit()
+                            return {"status": "OUTREACH_SENT", "message_id": tool_res.data.get("message_id")}
+                        else:
+                            return {"status": "OUTREACH_FAILED", "error": tool_res.error}
 
             return {"status": "ACKNOWLEDGED", "action": decision.action_type}
         except Exception as e:

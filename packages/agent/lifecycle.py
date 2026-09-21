@@ -18,11 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from packages.agent.runtime import agent_runtime, emergency_controls
-from packages.communications.base import OutboundMessageRequest
-from packages.communications.gateway import communication_gateway
 from packages.observability.logger import logger
-from packages.payments.base import CreateCheckoutRequest
-from packages.payments.dodo import dodo_provider
 from packages.payments.verification import payment_verification_service
 from packages.projects.acceptance import ProjectAssessmentRequest, project_acceptance_engine
 from packages.projects.delivery import project_delivery_engine
@@ -105,32 +101,65 @@ class AutonomousLifecycleEngine:
         prospect = await prospecting_engine.ingest_prospect(prospect_data)
         logger.info(f"Prospect created: {prospect.id}, score={prospect.qualification_score}")
 
-        # 2. QUALIFICATION & OUTREACH
+        # 2. QUALIFICATION & OUTREACH (Via Authoritative ToolGateway)
         outreach_status = "SKIPPED"
         if not emergency_controls.stop_outreach and prospect.qualification_score >= 0.5:
-            outreach_req = OutboundMessageRequest(
-                recipient=lead_email,
-                sender=settings.SMTP_FROM_EMAIL,
-                subject=f"Workflow automation efficiency: {prospect.business_name}",
-                content=(
-                    f"Hello {contact_name or prospect.business_name},\n\n"
-                    f"We noticed potential opportunities to automate and streamline workflows at {prospect.business_name}.\n\n"
-                    f"We deliver fixed-price, autonomous engineering solutions backed by 5-layer adversarial QA.\n\n"
-                    f"Best regards,\nAxion Engineering"
-                ),
-                channel=ChannelType.EMAIL,
-                prospect_id=prospect.id,
-            )
-            dispatch_res = await communication_gateway.dispatch(outreach_req)
-            outreach_status = dispatch_res.status.value if hasattr(dispatch_res.status, "value") else str(dispatch_res.status)
-            logger.info(f"Outreach status: {outreach_status}")
+            # Build evidence-derived personalized outreach
+            pain_summary = []
+            if isinstance(prospect.pain_points, dict):
+                pts = prospect.pain_points.get("points", [])
+                obs_list = prospect.pain_points.get("observations", [])
+                if pts:
+                    pain_summary.extend(pts)
+                for ob in obs_list:
+                    if isinstance(ob, dict) and ob.get("statement"):
+                        pain_summary.append(ob["statement"])
+                    elif hasattr(ob, "statement"):
+                        pain_summary.append(ob.statement)
 
-            async with async_session_factory() as session:
-                p_row = await session.get(Prospect, prospect.id)
-                if p_row:
-                    p_row.status = "CONTACTED"
-                    p_row.last_contacted_at = utc_now()
-                    await session.commit()
+            target_name = contact_name or prospect.business_name
+            if pain_summary:
+                evidence_focus = f"Specifically, we observed integration needs around: {pain_summary[0]}."
+            else:
+                evidence_focus = f"We analyzed the {prospect.industry or 'operational'} workflow infrastructure for {prospect.business_name}."
+
+            personalized_content = (
+                f"Hello {target_name},\n\n"
+                f"{evidence_focus}\n\n"
+                f"We design and deploy fixed-price autonomous backend workflows and API integrations, "
+                f"verified by 5-layer adversarial QA and delivered with full cryptographic test manifests.\n\n"
+                f"Would you be open to reviewing a scope and fixed quote for {prospect.business_name}?\n\n"
+                f"Best regards,\nAxion Autonomous Engineering"
+            )
+
+            from packages.tools.base import ToolRequest
+            from packages.tools.gateway import tool_gateway
+
+            tool_req = ToolRequest(
+                tool_name="communication.dispatch",
+                arguments={
+                    "recipient": lead_email,
+                    "sender": settings.SMTP_FROM_EMAIL,
+                    "subject": f"Technical workflow integration: {prospect.business_name}",
+                    "content": personalized_content,
+                    "channel": "EMAIL",
+                    "prospect_id": prospect.id,
+                },
+                requested_by_role="OPERATOR",
+                client_id=prospect.id,
+                idempotency_key=f"outreach_{prospect.id}_{int(utc_now().timestamp())}",
+            )
+            dispatch_res = await tool_gateway.execute(tool_req)
+            outreach_status = "SENT" if dispatch_res.success else f"FAILED: {dispatch_res.error}"
+            logger.info(f"Outreach status via ToolGateway: {outreach_status}")
+
+            if dispatch_res.success:
+                async with async_session_factory() as session:
+                    p_row = await session.get(Prospect, prospect.id)
+                    if p_row:
+                        p_row.status = "CONTACTED"
+                        p_row.last_contacted_at = utc_now()
+                        await session.commit()
 
         # Stop and wait for inbound client response
         return {
@@ -180,26 +209,39 @@ class AutonomousLifecycleEngine:
                 quote_amount = quote.amount
                 proj_name = proj.name
 
-            # Create One-Time Dodo Checkout Session
-            chk_req = CreateCheckoutRequest(
+            # Create One-Time Dodo Checkout Session via Authoritative ToolGateway
+            from packages.tools.base import ToolRequest
+            from packages.tools.gateway import tool_gateway
+
+            tool_req = ToolRequest(
+                tool_name="payment.create_checkout",
+                arguments={
+                    "quote_id": inbound_res.quote_id,
+                    "amount": float(quote_amount),
+                    "currency": "USD",
+                    "product_name": proj_name,
+                    "customer_email": sender,
+                    "customer_name": None,
+                },
                 project_id=inbound_res.project_id,
                 client_id=inbound_res.client_id,
-                quote_id=inbound_res.quote_id,
-                amount=quote_amount,
-                currency="USD",
-                product_name=proj_name,
-                customer_email=sender,
+                requested_by_role="OPERATOR",
+                idempotency_key=f"checkout_{inbound_res.project_id}_{inbound_res.quote_id}",
             )
-            chk_res = await dodo_provider.create_checkout(chk_req)
-            logger.info(f"One-time project checkout created: {chk_res.checkout_id}")
+            tool_res = await tool_gateway.execute(tool_req)
+            if not tool_res.success:
+                raise RuntimeError(f"Payment checkout creation failed via ToolGateway: {tool_res.error}")
+
+            chk_data = tool_res.data
+            logger.info(f"One-time project checkout created via ToolGateway: {chk_data['checkout_id']}")
 
             return {
                 "status": "CHECKOUT_CREATED",
                 "project_id": inbound_res.project_id,
                 "client_id": inbound_res.client_id,
                 "quote_id": inbound_res.quote_id,
-                "checkout_id": chk_res.checkout_id,
-                "checkout_url": chk_res.checkout_url,
+                "checkout_id": chk_data["checkout_id"],
+                "checkout_url": chk_data["checkout_url"],
                 "amount": quote_amount,
                 "requirements": inbound_res.extracted_requirements.deliverables if inbound_res.extracted_requirements else [],
             }
